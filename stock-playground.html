@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- theme-color must match --bg below; update both together -->
+<meta name="theme-color" content="#0b0e1a">
 <title>Stock/Bond/ETF What-If Playground</title>
 <style>
   :root {
@@ -26,6 +31,8 @@
     --shadow: 0 8px 24px rgba(0,0,0,.35);
     --header-h: 56px;
     --nav-h: 60px;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
   }
   * { box-sizing: border-box; }
   html, body {
@@ -37,8 +44,8 @@
   #app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; max-width: 640px; margin: 0 auto; position: relative; }
 
   header.topbar {
-    height: var(--header-h); flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
-    padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--bg); position: sticky; top: 0; z-index: 10;
+    height: calc(var(--header-h) + var(--safe-top)); flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+    padding: var(--safe-top) 16px 0; border-bottom: 1px solid var(--border); background: var(--bg); position: sticky; top: 0; z-index: 10;
   }
   header.topbar .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
   header.topbar .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
@@ -101,11 +108,11 @@
   .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .stat { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; }
   .stat .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; }
-  .stat .value { font-size: 17px; font-weight: 700; margin-top: 3px; }
+  .stat .value { font-size: 17px; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; }
   .stat .value.pos { color: var(--green); }
   .stat .value.neg { color: var(--red); }
 
-  .badge { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .badge { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .badge.pos { background: var(--green-soft); color: var(--green); }
   .badge.neg { background: var(--red-soft); color: var(--red); }
   .badge.neutral { background: var(--accent-soft); color: var(--accent-2); }
@@ -131,8 +138,8 @@
   .empty { text-align: center; padding: 40px 20px; color: var(--text-faint); font-size: 13px; }
 
   nav.bottomnav {
-    flex: 0 0 auto; height: var(--nav-h); display: flex; border-top: 1px solid var(--border);
-    background: var(--bg); position: sticky; bottom: 0; z-index: 10;
+    flex: 0 0 auto; height: calc(var(--nav-h) + var(--safe-bottom)); display: flex; border-top: 1px solid var(--border);
+    background: var(--bg); position: sticky; bottom: 0; z-index: 10; padding-bottom: var(--safe-bottom);
   }
   .nav-btn {
     flex: 1; background: transparent; border: none; color: var(--text-faint); font-size: 11px; font-weight: 600;
@@ -141,7 +148,7 @@
   .nav-btn .ic { font-size: 18px; }
   .nav-btn.active { color: var(--accent-2); }
 
-  #toast-container { position: fixed; left: 0; right: 0; bottom: calc(var(--nav-h) + 12px); display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 50; pointer-events: none; }
+  #toast-container { position: fixed; left: 0; right: 0; bottom: calc(var(--nav-h) + var(--safe-bottom) + 12px); display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 50; pointer-events: none; }
   .toast {
     max-width: 90%; padding: 10px 16px; border-radius: 999px; font-size: 13px; font-weight: 600; box-shadow: var(--shadow);
     animation: toastin .2s ease-out; background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
