@@ -178,6 +178,15 @@
     cache: 'stockplay.pricecache.v1'
   };
 
+  var PROVIDERS = {
+    openai: { label: 'OpenAI', style: 'openai', defaultBaseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o-mini' },
+    anthropic: { label: 'Anthropic', style: 'anthropic', defaultBaseUrl: 'https://api.anthropic.com/v1', defaultModel: 'claude-sonnet-5' },
+    openrouter: { label: 'OpenRouter', style: 'openai', defaultBaseUrl: 'https://openrouter.ai/api/v1', defaultModel: 'openai/gpt-4o-mini' },
+    custom: { label: 'Custom (OpenAI-compatible)', style: 'openai', defaultBaseUrl: '', defaultModel: '' }
+  };
+  var PROVIDER_ORDER = ['openai', 'anthropic', 'openrouter', 'custom'];
+  function providerOf(key) { return PROVIDERS[key] || PROVIDERS.custom; }
+
   var SYSTEM_PROMPT = [
     'You are a historical securities price lookup service.',
     'Given a ticker symbol, an asset type, and a list of dates, respond with the actual historical closing price',
@@ -214,7 +223,7 @@
 
   var S = {
     tab: 'new',
-    settings: { baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini' },
+    settings: { provider: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini' },
     scenarios: [],
     draft: defaultDraft(),
     priceCache: {},
@@ -353,37 +362,53 @@
     return null;
   }
 
+  function llmChatRequest(systemPrompt, userContent) {
+    var provider = providerOf(S.settings.provider);
+    var base = (S.settings.baseUrl || '').replace(/\/+$/, '');
+    if (!base || !S.settings.apiKey || !S.settings.model) {
+      return Promise.reject(new Error('Configure a Provider, Base URL, API Key, and Model in Settings before running a scenario.'));
+    }
+    var url, headers, body;
+    if (provider.style === 'anthropic') {
+      url = base + '/messages';
+      headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': S.settings.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      };
+      body = { model: S.settings.model, max_tokens: 1024, temperature: 0, system: systemPrompt, messages: [{ role: 'user', content: userContent }] };
+    } else {
+      url = base + '/chat/completions';
+      headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.settings.apiKey };
+      body = { model: S.settings.model, temperature: 0, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userContent }] };
+    }
+    return fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(body) })
+      .catch(function (err) {
+        throw new Error('Network error calling the LLM endpoint. If your provider blocks direct browser (CORS) requests, this "bring your own endpoint" approach cannot work around that without a backend proxy. (' + err.message + ')');
+      })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.text().then(function (t) {
+            throw new Error('LLM request failed: ' + res.status + ' ' + res.statusText + (t ? ' — ' + t.slice(0, 200) : ''));
+          });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        var content = provider.style === 'anthropic'
+          ? (data && data.content && data.content[0] && data.content[0].text)
+          : (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content);
+        if (!content) throw new Error('LLM response did not contain a message to parse.');
+        return content;
+      });
+  }
+
   function fetchPrices(ticker, dates) {
     var needed = dates.filter(function (d) { return !(cacheKey(ticker, d) in S.priceCache); });
     if (needed.length === 0) return Promise.resolve();
-    if (!S.settings.baseUrl || !S.settings.apiKey || !S.settings.model) {
-      return Promise.reject(new Error('Configure a Base URL, API Key, and Model in Settings before running a scenario.'));
-    }
-    var url = S.settings.baseUrl.replace(/\/+$/, '') + '/chat/completions';
-    var body = {
-      model: S.settings.model,
-      temperature: 0,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: JSON.stringify({ ticker: ticker, assetType: S.draft.assetType, dates: needed }) }
-      ]
-    };
-    return fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.settings.apiKey },
-      body: JSON.stringify(body)
-    }).catch(function (err) {
-      throw new Error('Network error calling the LLM endpoint. If your provider blocks direct browser (CORS) requests, this "bring your own endpoint" approach cannot work around that without a backend proxy. (' + err.message + ')');
-    }).then(function (res) {
-      if (!res.ok) {
-        return res.text().then(function (t) {
-          throw new Error('LLM request failed: ' + res.status + ' ' + res.statusText + (t ? ' — ' + t.slice(0, 200) : ''));
-        });
-      }
-      return res.json();
-    }).then(function (data) {
-      var content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-      if (!content) throw new Error('LLM response did not contain a message to parse.');
+    var userContent = JSON.stringify({ ticker: ticker, assetType: S.draft.assetType, dates: needed });
+    return llmChatRequest(SYSTEM_PROMPT, userContent).then(function (content) {
       var parsed = extractJSON(content);
       if (!parsed || !parsed.prices) throw new Error('Could not parse price JSON from the model response.');
       var any = false;
@@ -571,22 +596,13 @@
 
   function testConnection() {
     if (!S.settings.baseUrl || !S.settings.apiKey || !S.settings.model) {
-      toast('error', 'Fill in Base URL, API Key, and Model first.'); return;
+      toast('error', 'Fill in Provider, Base URL, API Key, and Model first.'); return;
     }
     S.loading = true; render();
-    var url = S.settings.baseUrl.replace(/\/+$/, '') + '/chat/completions';
-    fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.settings.apiKey },
-      body: JSON.stringify({ model: S.settings.model, messages: [{ role: 'user', content: 'Reply with the single word: ok' }], temperature: 0 })
-    }).then(function (res) {
-      if (!res.ok) return res.text().then(function (t) { throw new Error(res.status + ' ' + res.statusText + (t ? ' — ' + t.slice(0, 150) : '')); });
-      return res.json();
-    }).then(function () {
-      toast('success', 'Connection OK.');
-    }).catch(function (err) {
-      toast('error', 'Connection failed: ' + err.message);
-    }).then(function () { S.loading = false; render(); });
+    llmChatRequest('You are a helpful assistant.', 'Reply with the single word: ok')
+      .then(function () { toast('success', 'Connection OK.'); })
+      .catch(function (err) { toast('error', 'Connection failed: ' + err.message); })
+      .then(function () { S.loading = false; render(); });
   }
 
   function clearCache() {
@@ -801,12 +817,18 @@
 
   function renderSettingsTab() {
     var s = S.settings;
+    var provider = providerOf(s.provider);
     var html = '<div class="card">';
     html += '<h2>LLM Endpoint (price oracle)</h2>';
-    html += '<div class="field"><label>Base URL</label><input type="text" data-bind="settings.baseUrl" value="' + escapeHTML(s.baseUrl) + '" placeholder="https://api.openai.com/v1"></div>';
-    html += '<div class="field"><label>API Key</label><input type="password" data-bind="settings.apiKey" value="' + escapeHTML(s.apiKey) + '" placeholder="sk-…"></div>';
-    html += '<div class="field"><label>Model</label><input type="text" data-bind="settings.model" value="' + escapeHTML(s.model) + '" placeholder="gpt-4o-mini"></div>';
-    html += '<div class="hint">Requests go straight from your browser to <code>{Base URL}/chat/completions</code> with an <code>Authorization: Bearer</code> header — nothing passes through a server you don\'t control. Some providers block direct browser (CORS) requests entirely; if calls fail immediately with a network error, that\'s the provider\'s CORS policy, not a bug here, and there\'s no backend in this app to route around it.</div>';
+    html += '<div class="field"><label>Provider</label><select data-bind="settings.provider">' + PROVIDER_ORDER.map(function (key) {
+      return '<option value="' + key + '"' + (s.provider === key ? ' selected' : '') + '>' + PROVIDERS[key].label + '</option>';
+    }).join('') + '</select></div>';
+    html += '<div class="field"><label>Base URL</label><input type="text" data-bind="settings.baseUrl" value="' + escapeHTML(s.baseUrl) + '" placeholder="' + escapeHTML(provider.defaultBaseUrl || 'https://…') + '"></div>';
+    html += '<div class="field"><label>API Key</label><input type="password" data-bind="settings.apiKey" value="' + escapeHTML(s.apiKey) + '" placeholder="' + (provider.style === 'anthropic' ? 'sk-ant-…' : 'sk-…') + '"></div>';
+    html += '<div class="field"><label>Model</label><input type="text" data-bind="settings.model" value="' + escapeHTML(s.model) + '" placeholder="' + escapeHTML(provider.defaultModel || 'model name') + '"></div>';
+    html += '<div class="hint">Requests go straight from your browser to <code>{Base URL}' + (provider.style === 'anthropic' ? '/messages' : '/chat/completions') + '</code>' +
+      (provider.style === 'anthropic' ? ' with an <code>x-api-key</code> header (plus the browser-access header Anthropic requires for direct client-side calls)' : ' with an <code>Authorization: Bearer</code> header') +
+      ' — nothing passes through a server you don\'t control. Some providers block direct browser (CORS) requests entirely; if calls fail immediately with a network error, that\'s the provider\'s CORS policy, not a bug here, and there\'s no backend in this app to route around it. Choosing "Custom" targets any OpenAI-compatible <code>/chat/completions</code> endpoint (local servers, other gateways, etc.).</div>';
     html += '<div class="btn-row"><button class="secondary" data-action="test-connection" ' + (S.loading ? 'disabled' : '') + '>Test Connection</button></div>';
     html += '</div>';
 
@@ -865,6 +887,16 @@
     else if (action === 'clear-cache') { if (confirm('Clear all cached prices?')) clearCache(); }
   }
 
+  function onProviderChange(newProviderKey) {
+    var oldProvider = providerOf(S.settings.provider);
+    var newProvider = providerOf(newProviderKey);
+    if (!S.settings.baseUrl || S.settings.baseUrl === oldProvider.defaultBaseUrl) S.settings.baseUrl = newProvider.defaultBaseUrl;
+    if (!S.settings.model || S.settings.model === oldProvider.defaultModel) S.settings.model = newProvider.defaultModel;
+    S.settings.provider = newProviderKey;
+    saveSettings();
+    render();
+  }
+
   function onFormChange(e) {
     var el = e.target.closest('[data-bind]');
     if (!el) return;
@@ -874,6 +906,7 @@
     else if (el.type === 'number') value = el.value === '' ? 0 : Number(el.value);
     else value = el.value;
 
+    if (path === 'settings.provider') { onProviderChange(value); return; }
     if (path.indexOf('settings.') === 0) { setPath(S, path, value); saveSettings(); return; }
     setPath(S.draft, path, value);
 
