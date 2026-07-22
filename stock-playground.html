@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Stock/Bond/ETF What-If Playground</title>
+<style>
+  :root {
+    --bg: #0b0e1a;
+    --surface: #131829;
+    --surface-2: #1a2138;
+    --border: #2a3350;
+    --text: #e8ebf5;
+    --text-dim: #8b93ab;
+    --text-faint: #5c6480;
+    --accent: #6366f1;
+    --accent-2: #818cf8;
+    --accent-soft: rgba(99,102,241,.15);
+    --green: #22c55e;
+    --green-soft: rgba(34,197,94,.15);
+    --red: #f43f5e;
+    --red-soft: rgba(244,63,94,.15);
+    --amber: #f59e0b;
+    --radius: 14px;
+    --radius-sm: 9px;
+    --shadow: 0 8px 24px rgba(0,0,0,.35);
+    --header-h: 56px;
+    --nav-h: 60px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; max-width: 640px; margin: 0 auto; position: relative; }
+
+  header.topbar {
+    height: var(--header-h); flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--bg); position: sticky; top: 0; z-index: 10;
+  }
+  header.topbar .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
+  header.topbar .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+  .hbtn {
+    background: var(--surface-2); border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: var(--radius-sm); padding: 6px 10px; font-size: 12px; cursor: pointer;
+  }
+  .hbtn:hover { color: var(--text); border-color: var(--accent); }
+
+  main.scroll { flex: 1 1 auto; overflow-y: auto; padding: 16px; padding-bottom: 24px; -webkit-overflow-scrolling: touch; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px; margin-bottom: 14px; box-shadow: var(--shadow);
+  }
+  .card h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); }
+  .card + .card { margin-top: 0; }
+
+  .field { margin-bottom: 12px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+  .row { display: flex; gap: 10px; }
+  .row .field { flex: 1; min-width: 0; }
+
+  input[type=text], input[type=number], input[type=date], input[type=password], select {
+    width: 100%; background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: var(--radius-sm); padding: 10px 12px; font-size: 14px; outline: none;
+    appearance: none; -webkit-appearance: none;
+  }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .hint { font-size: 11px; color: var(--text-faint); margin-top: 5px; line-height: 1.4; }
+
+  .toggle-pill {
+    display: flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; padding: 3px; gap: 3px;
+  }
+  .toggle-pill button {
+    flex: 1; border: none; background: transparent; color: var(--text-dim); padding: 8px 10px; border-radius: 999px;
+    font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s, color .15s;
+  }
+  .toggle-pill button.active { background: var(--accent); color: #fff; }
+
+  .checkrow { display: flex; align-items: center; gap: 8px; }
+  .checkrow input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
+  .checkrow label { font-size: 13px; color: var(--text); margin: 0; }
+
+  button.primary {
+    width: 100%; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: none;
+    border-radius: var(--radius-sm); padding: 13px; font-size: 14px; font-weight: 700; cursor: pointer;
+  }
+  button.primary:disabled { opacity: .55; cursor: not-allowed; }
+  button.secondary {
+    width: 100%; background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 11px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  button.secondary:hover { border-color: var(--accent); }
+  button.danger { color: var(--red); }
+  .btn-row { display: flex; gap: 10px; margin-top: 10px; }
+  .btn-row > * { flex: 1; }
+
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stat { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; }
+  .stat .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; }
+  .stat .value { font-size: 17px; font-weight: 700; margin-top: 3px; }
+  .stat .value.pos { color: var(--green); }
+  .stat .value.neg { color: var(--red); }
+
+  .badge { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .badge.pos { background: var(--green-soft); color: var(--green); }
+  .badge.neg { background: var(--red-soft); color: var(--red); }
+  .badge.neutral { background: var(--accent-soft); color: var(--accent-2); }
+
+  .chart-wrap { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; }
+  .chart-wrap svg { width: 100%; height: auto; display: block; }
+  .legend { display: flex; gap: 16px; font-size: 11px; color: var(--text-dim); margin-top: 8px; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .legend i { width: 14px; height: 2px; display: inline-block; background: var(--accent); }
+  .legend i.bench { background: var(--amber); }
+
+  .scenario-item {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 12px; margin-bottom: 10px; cursor: pointer;
+  }
+  .scenario-item:hover { border-color: var(--accent); }
+  .scenario-item .top { display: flex; justify-content: space-between; align-items: center; }
+  .scenario-item .ticker { font-weight: 700; font-size: 15px; }
+  .scenario-item .meta { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  .scenario-item .actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+  .scenario-item .actions button { font-size: 11px; padding: 6px 10px; }
+
+  .empty { text-align: center; padding: 40px 20px; color: var(--text-faint); font-size: 13px; }
+
+  nav.bottomnav {
+    flex: 0 0 auto; height: var(--nav-h); display: flex; border-top: 1px solid var(--border);
+    background: var(--bg); position: sticky; bottom: 0; z-index: 10;
+  }
+  .nav-btn {
+    flex: 1; background: transparent; border: none; color: var(--text-faint); font-size: 11px; font-weight: 600;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; cursor: pointer;
+  }
+  .nav-btn .ic { font-size: 18px; }
+  .nav-btn.active { color: var(--accent-2); }
+
+  #toast-container { position: fixed; left: 0; right: 0; bottom: calc(var(--nav-h) + 12px); display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 50; pointer-events: none; }
+  .toast {
+    max-width: 90%; padding: 10px 16px; border-radius: 999px; font-size: 13px; font-weight: 600; box-shadow: var(--shadow);
+    animation: toastin .2s ease-out; background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+  }
+  .toast.success { border-color: var(--green); color: var(--green); }
+  .toast.error { border-color: var(--red); color: var(--red); }
+  @keyframes toastin { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+  .spinner {
+    width: 15px; height: 15px; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; border-radius: 50%;
+    display: inline-block; vertical-align: -3px; margin-right: 8px; animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .section-label { font-size: 12px; font-weight: 700; color: var(--accent-2); margin: 4px 0 10px; text-transform: uppercase; letter-spacing: .05em; }
+  .divider { height: 1px; background: var(--border); margin: 14px 0; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast-container"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------------------------------------------------------------------
+   * Storage keys (versioned so future schema changes can migrate/reset
+   * independently of each other).
+   * ------------------------------------------------------------------- */
+  var STORE = {
+    settings: 'stockplay.settings.v1',
+    scenarios: 'stockplay.scenarios.v1',
+    cache: 'stockplay.pricecache.v1'
+  };
+
+  var SYSTEM_PROMPT = [
+    'You are a historical securities price lookup service.',
+    'Given a ticker symbol, an asset type, and a list of dates, respond with the actual historical closing price',
+    '(nominal close, not adjusted) for each requested date, drawn from your knowledge of real market history.',
+    'If the market was closed on a requested date (weekend or holiday), use the closing price from the most recent prior trading day, but still key the answer under the ORIGINAL requested date string.',
+    'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
+    '{"ticker":"<TICKER>","prices":{"YYYY-MM-DD":<number>, ...}}',
+    'Only include dates you have a reasonable, good-faith estimate for. Omit dates you truly cannot estimate rather than inventing an implausible number.'
+  ].join(' ');
+
+  /* ---------------------------------------------------------------------
+   * State singleton
+   * ------------------------------------------------------------------- */
+  function todayISO() { return new Date().toISOString().slice(0, 10); }
+  function yearsAgoISO(n) {
+    var d = new Date();
+    d.setUTCFullYear(d.getUTCFullYear() - n);
+    return d.toISOString().slice(0, 10);
+  }
+
+  function defaultDraft() {
+    return {
+      ticker: '',
+      assetType: 'stock',
+      currency: 'USD',
+      mode: 'lumpsum',
+      lumpsum: { amount: 1000, buyDate: yearsAgoISO(1) },
+      dca: { amount: 100, startDate: yearsAgoISO(1), endDate: todayISO(), frequency: 'monthly' },
+      sellDate: todayISO(),
+      bond: { couponRate: 4, faceValue: 1000 },
+      benchmark: { enabled: false, ticker: 'SPY' }
+    };
+  }
+
+  var S = {
+    tab: 'new',
+    settings: { baseUrl: 'https://api.openai.com/v1', apiKey: '', model: 'gpt-4o-mini' },
+    scenarios: [],
+    draft: defaultDraft(),
+    priceCache: {},
+    loading: false,
+    activeResult: null,
+    activeError: null
+  };
+
+  /* ---------------------------------------------------------------------
+   * Persistence
+   * ------------------------------------------------------------------- */
+  function loadJSON(key, fallback) {
+    try {
+      var raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      var parsed = JSON.parse(raw);
+      return parsed == null ? fallback : parsed;
+    } catch (e) { return fallback; }
+  }
+  function saveJSON(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* storage full/unavailable: ignore */ }
+  }
+  function loadState() {
+    S.settings = Object.assign({}, S.settings, loadJSON(STORE.settings, {}));
+    S.scenarios = loadJSON(STORE.scenarios, []);
+    S.priceCache = loadJSON(STORE.cache, {});
+  }
+  function saveSettings() { saveJSON(STORE.settings, S.settings); }
+  function saveScenarios() { saveJSON(STORE.scenarios, S.scenarios); }
+  function saveCache() { saveJSON(STORE.cache, S.priceCache); }
+
+  /* ---------------------------------------------------------------------
+   * Small utilities
+   * ------------------------------------------------------------------- */
+  function uid() { return 's_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8); }
+  function getPath(obj, path) {
+    var parts = path.split('.'); var cur = obj;
+    for (var i = 0; i < parts.length; i++) { if (cur == null) return undefined; cur = cur[parts[i]]; }
+    return cur;
+  }
+  function setPath(obj, path, value) {
+    var parts = path.split('.'); var cur = obj;
+    for (var i = 0; i < parts.length - 1; i++) {
+      if (typeof cur[parts[i]] !== 'object' || cur[parts[i]] === null) cur[parts[i]] = {};
+      cur = cur[parts[i]];
+    }
+    cur[parts[parts.length - 1]] = value;
+  }
+  function escapeHTML(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function fmtCurrency(amount, currency) {
+    if (!Number.isFinite(amount)) return '—';
+    try {
+      return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency || 'USD', maximumFractionDigits: 2 }).format(amount);
+    } catch (e) {
+      return (currency || '') + ' ' + amount.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+  }
+  function fmtPercent(pct) {
+    if (!Number.isFinite(pct)) return '—';
+    return (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+  }
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso + 'T00:00:00Z');
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  }
+
+  function ymd(d) { return d.toISOString().slice(0, 10); }
+  function parseISO(iso) { var p = iso.split('-').map(Number); return new Date(Date.UTC(p[0], p[1] - 1, p[2])); }
+  function addDays(iso, n) { var d = parseISO(iso); d.setUTCDate(d.getUTCDate() + n); return ymd(d); }
+  function addMonths(iso, n) {
+    var p = iso.split('-').map(Number);
+    var target = new Date(Date.UTC(p[0], p[1] - 1 + n, 1));
+    var daysInMonth = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+    var day = Math.min(p[2], daysInMonth);
+    target.setUTCDate(day);
+    return ymd(target);
+  }
+  function diffYears(startIso, endIso) {
+    var ms = parseISO(endIso).getTime() - parseISO(startIso).getTime();
+    return ms / (1000 * 60 * 60 * 24 * 365.25);
+  }
+
+  /* ---------------------------------------------------------------------
+   * Scheduling: recurring/DCA contribution dates & chart sample dates
+   * ------------------------------------------------------------------- */
+  function generateSchedule(start, end, freq) {
+    if (!start || !end || start > end) return [start].filter(Boolean);
+    var dates = [];
+    if (freq === 'weekly') {
+      var d = start;
+      while (d <= end && dates.length < 200) { dates.push(d); d = addDays(d, 7); }
+    } else {
+      var stepMonths = freq === 'quarterly' ? 3 : 1;
+      var i = 0;
+      while (dates.length < 200) {
+        var dd = addMonths(start, i * stepMonths);
+        if (dd > end) break;
+        dates.push(dd);
+        i++;
+      }
+    }
+    if (dates.length === 0) dates.push(start);
+    return dates;
+  }
+
+  function contributionDates(draft) {
+    return draft.mode === 'dca'
+      ? generateSchedule(draft.dca.startDate, draft.dca.endDate, draft.dca.frequency)
+      : [draft.lumpsum.buyDate];
+  }
+
+  function sampleDates(draft) {
+    var start = draft.mode === 'dca' ? draft.dca.startDate : draft.lumpsum.buyDate;
+    var end = draft.sellDate;
+    var grid = generateSchedule(start, end, 'monthly');
+    var contribs = contributionDates(draft);
+    var set = {};
+    grid.concat(contribs, [start, end]).forEach(function (d) { if (d) set[d] = true; });
+    return Object.keys(set).sort().slice(0, 80);
+  }
+
+  /* ---------------------------------------------------------------------
+   * LLM price oracle
+   * ------------------------------------------------------------------- */
+  function cacheKey(ticker, date) { return ticker + '|' + date; }
+
+  function extractJSON(text) {
+    try { return JSON.parse(text); } catch (e) {}
+    var m = text.match(/\{[\s\S]*\}/);
+    if (m) { try { return JSON.parse(m[0]); } catch (e2) {} }
+    return null;
+  }
+
+  function fetchPrices(ticker, dates) {
+    var needed = dates.filter(function (d) { return !(cacheKey(ticker, d) in S.priceCache); });
+    if (needed.length === 0) return Promise.resolve();
+    if (!S.settings.baseUrl || !S.settings.apiKey || !S.settings.model) {
+      return Promise.reject(new Error('Configure a Base URL, API Key, and Model in Settings before running a scenario.'));
+    }
+    var url = S.settings.baseUrl.replace(/\/+$/, '') + '/chat/completions';
+    var body = {
+      model: S.settings.model,
+      temperature: 0,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: JSON.stringify({ ticker: ticker, assetType: S.draft.assetType, dates: needed }) }
+      ]
+    };
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.settings.apiKey },
+      body: JSON.stringify(body)
+    }).catch(function (err) {
+      throw new Error('Network error calling the LLM endpoint. If your provider blocks direct browser (CORS) requests, this "bring your own endpoint" approach cannot work around that without a backend proxy. (' + err.message + ')');
+    }).then(function (res) {
+      if (!res.ok) {
+        return res.text().then(function (t) {
+          throw new Error('LLM request failed: ' + res.status + ' ' + res.statusText + (t ? ' — ' + t.slice(0, 200) : ''));
+        });
+      }
+      return res.json();
+    }).then(function (data) {
+      var content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+      if (!content) throw new Error('LLM response did not contain a message to parse.');
+      var parsed = extractJSON(content);
+      if (!parsed || !parsed.prices) throw new Error('Could not parse price JSON from the model response.');
+      var any = false;
+      Object.keys(parsed.prices).forEach(function (date) {
+        var num = Number(parsed.prices[date]);
+        if (Number.isFinite(num) && num > 0) { S.priceCache[cacheKey(ticker, date)] = num; any = true; }
+      });
+      if (!any) throw new Error('Model returned no usable prices for ' + ticker + '.');
+      saveCache();
+    });
+  }
+
+  function getPricesMap(ticker, dates) {
+    var out = {}; var missing = [];
+    dates.forEach(function (d) {
+      var key = cacheKey(ticker, d);
+      if (key in S.priceCache) { out[d] = S.priceCache[key]; return; }
+      var found = null;
+      for (var back = 1; back <= 7 && !found; back++) {
+        var k2 = cacheKey(ticker, addDays(d, -back));
+        if (k2 in S.priceCache) found = S.priceCache[k2];
+      }
+      if (found != null) out[d] = found; else missing.push(d);
+    });
+    if (missing.length) throw new Error('Missing price data for ' + ticker + ' on: ' + missing.slice(0, 5).join(', ') + (missing.length > 5 ? '…' : ''));
+    return out;
+  }
+
+  /* ---------------------------------------------------------------------
+   * Deterministic financial math
+   * ------------------------------------------------------------------- */
+  function computeLumpSum(draft, prices) {
+    var buyPrice = prices[draft.lumpsum.buyDate];
+    var sellPrice = prices[draft.sellDate];
+    var shares = draft.lumpsum.amount / buyPrice;
+    var currentValue = shares * sellPrice;
+    var investedTotal = draft.lumpsum.amount;
+    var gainAbs = currentValue - investedTotal;
+    return {
+      contributions: [{ date: draft.lumpsum.buyDate, amount: investedTotal, price: buyPrice, shares: shares }],
+      investedTotal: investedTotal, totalShares: shares, avgCost: buyPrice,
+      sellPrice: sellPrice, currentValue: currentValue, gainAbs: gainAbs, gainPct: (gainAbs / investedTotal) * 100
+    };
+  }
+
+  function computeDCA(draft, prices) {
+    var dates = contributionDates(draft);
+    var investedTotal = 0, totalShares = 0, contributions = [];
+    dates.forEach(function (d) {
+      var p = prices[d];
+      var sh = draft.dca.amount / p;
+      investedTotal += draft.dca.amount; totalShares += sh;
+      contributions.push({ date: d, amount: draft.dca.amount, price: p, shares: sh });
+    });
+    var sellPrice = prices[draft.sellDate];
+    var currentValue = totalShares * sellPrice;
+    var gainAbs = currentValue - investedTotal;
+    return {
+      contributions: contributions, investedTotal: investedTotal, totalShares: totalShares,
+      avgCost: investedTotal / totalShares, sellPrice: sellPrice, currentValue: currentValue,
+      gainAbs: gainAbs, gainPct: (gainAbs / investedTotal) * 100
+    };
+  }
+
+  function computeBase(draft, prices) {
+    return draft.mode === 'dca' ? computeDCA(draft, prices) : computeLumpSum(draft, prices);
+  }
+
+  function computeBondAddon(draft, base) {
+    var startDate = draft.mode === 'dca' ? draft.dca.startDate : draft.lumpsum.buyDate;
+    var years = Math.max(0, diffYears(startDate, draft.sellDate));
+    var principal = draft.bond.faceValue > 0 ? draft.bond.faceValue : base.investedTotal;
+    var couponIncome = principal * (draft.bond.couponRate / 100) * years;
+    var totalReturnAbs = base.gainAbs + couponIncome;
+    return {
+      years: years, couponIncome: couponIncome, totalReturnAbs: totalReturnAbs,
+      totalReturnPct: (totalReturnAbs / base.investedTotal) * 100
+    };
+  }
+
+  function buildChartSeries(draft, base, prices, benchBase, benchPrices) {
+    var dates = sampleDates(draft);
+    return dates.map(function (d) {
+      var sharesSoFar = 0;
+      base.contributions.forEach(function (c) { if (c.date <= d) sharesSoFar += c.shares; });
+      var value = (sharesSoFar > 0 && prices[d]) ? sharesSoFar * prices[d] : null;
+      var benchValue = null;
+      if (benchBase && benchPrices) {
+        var bShares = 0;
+        benchBase.contributions.forEach(function (c) { if (c.date <= d) bShares += c.shares; });
+        benchValue = (bShares > 0 && benchPrices[d]) ? bShares * benchPrices[d] : null;
+      }
+      return { date: d, value: value, benchValue: benchValue };
+    });
+  }
+
+  /* ---------------------------------------------------------------------
+   * Validation
+   * ------------------------------------------------------------------- */
+  function validateDraft(draft) {
+    if (!draft.ticker || !draft.ticker.trim()) throw new Error('Enter a ticker symbol.');
+    if (!draft.sellDate || draft.sellDate > todayISO()) throw new Error('Sell date must be today or in the past.');
+    if (draft.mode === 'lumpsum') {
+      if (!(draft.lumpsum.amount > 0)) throw new Error('Purchase amount must be greater than 0.');
+      if (!draft.lumpsum.buyDate || draft.lumpsum.buyDate > todayISO()) throw new Error('Buy date must be today or in the past.');
+      if (draft.lumpsum.buyDate >= draft.sellDate) throw new Error('Buy date must be before the sell date.');
+    } else {
+      if (!(draft.dca.amount > 0)) throw new Error('Contribution amount must be greater than 0.');
+      if (!draft.dca.startDate || !draft.dca.endDate || draft.dca.startDate > draft.dca.endDate) throw new Error('DCA start date must be before end date.');
+      if (draft.dca.endDate > draft.sellDate) throw new Error('DCA end date cannot be after the sell date.');
+      if (draft.dca.startDate > todayISO()) throw new Error('DCA start date must be today or in the past.');
+    }
+    if (draft.assetType === 'bond') {
+      if (!(draft.bond.couponRate >= 0)) throw new Error('Coupon rate must be 0 or greater.');
+      if (!(draft.bond.faceValue >= 0)) throw new Error('Face value must be 0 or greater.');
+    }
+    if (draft.benchmark.enabled && !draft.benchmark.ticker.trim()) throw new Error('Enter a benchmark ticker or disable the benchmark comparison.');
+  }
+
+  /* ---------------------------------------------------------------------
+   * Actions
+   * ------------------------------------------------------------------- */
+  function runScenario() {
+    var draft = S.draft;
+    try { validateDraft(draft); } catch (err) { toast('error', err.message); return; }
+    draft.ticker = draft.ticker.trim().toUpperCase();
+    if (draft.benchmark.enabled) draft.benchmark.ticker = draft.benchmark.ticker.trim().toUpperCase();
+
+    S.loading = true; S.activeError = null; render();
+    var dates = sampleDates(draft);
+
+    fetchPrices(draft.ticker, dates)
+      .then(function () {
+        return draft.benchmark.enabled ? fetchPrices(draft.benchmark.ticker, dates) : null;
+      })
+      .then(function () {
+        var prices = getPricesMap(draft.ticker, dates);
+        var base = computeBase(draft, prices);
+        var bond = draft.assetType === 'bond' ? computeBondAddon(draft, base) : null;
+        var benchBase = null, benchPrices = null;
+        if (draft.benchmark.enabled) {
+          benchPrices = getPricesMap(draft.benchmark.ticker, dates);
+          benchBase = computeBase(draft, benchPrices);
+        }
+        var chartSeries = buildChartSeries(draft, base, prices, benchBase, benchPrices);
+        S.activeResult = { base: base, bond: bond, benchBase: benchBase, chartSeries: chartSeries, computedAt: new Date().toISOString() };
+        toast('success', 'Prices loaded for ' + draft.ticker + '.');
+      })
+      .catch(function (err) {
+        S.activeResult = null;
+        toast('error', err.message || 'Failed to fetch prices.');
+      })
+      .then(function () { S.loading = false; render(); });
+  }
+
+  function saveScenario() {
+    if (!S.activeResult) { toast('error', 'Run the scenario before saving it.'); return; }
+    var scenario = {
+      id: uid(),
+      createdAt: new Date().toISOString(),
+      draft: JSON.parse(JSON.stringify(S.draft)),
+      result: JSON.parse(JSON.stringify(S.activeResult))
+    };
+    S.scenarios.unshift(scenario);
+    saveScenarios();
+    toast('success', 'Scenario saved.');
+    S.tab = 'history';
+    render();
+  }
+
+  function loadScenario(id) {
+    var sc = S.scenarios.filter(function (s) { return s.id === id; })[0];
+    if (!sc) return;
+    S.draft = JSON.parse(JSON.stringify(sc.draft));
+    S.activeResult = JSON.parse(JSON.stringify(sc.result));
+    S.tab = 'new';
+    render();
+  }
+
+  function deleteScenario(id) {
+    S.scenarios = S.scenarios.filter(function (s) { return s.id !== id; });
+    saveScenarios();
+    render();
+  }
+
+  function testConnection() {
+    if (!S.settings.baseUrl || !S.settings.apiKey || !S.settings.model) {
+      toast('error', 'Fill in Base URL, API Key, and Model first.'); return;
+    }
+    S.loading = true; render();
+    var url = S.settings.baseUrl.replace(/\/+$/, '') + '/chat/completions';
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.settings.apiKey },
+      body: JSON.stringify({ model: S.settings.model, messages: [{ role: 'user', content: 'Reply with the single word: ok' }], temperature: 0 })
+    }).then(function (res) {
+      if (!res.ok) return res.text().then(function (t) { throw new Error(res.status + ' ' + res.statusText + (t ? ' — ' + t.slice(0, 150) : '')); });
+      return res.json();
+    }).then(function () {
+      toast('success', 'Connection OK.');
+    }).catch(function (err) {
+      toast('error', 'Connection failed: ' + err.message);
+    }).then(function () { S.loading = false; render(); });
+  }
+
+  function clearCache() {
+    S.priceCache = {}; saveCache(); toast('success', 'Price cache cleared.');
+  }
+
+  /* ---------------------------------------------------------------------
+   * Toasts
+   * ------------------------------------------------------------------- */
+  function toast(type, message) {
+    var el = document.createElement('div');
+    el.className = 'toast ' + type;
+    el.textContent = message;
+    var container = document.getElementById('toast-container');
+    container.appendChild(el);
+    setTimeout(function () { el.remove(); }, 3200);
+  }
+
+  /* ---------------------------------------------------------------------
+   * Chart rendering (inline SVG, no libraries)
+   * ------------------------------------------------------------------- */
+  function renderChartSVG(series, currency) {
+    var W = 600, H = 220, pad = 28;
+    var pts = series.filter(function (p) { return p.value != null; });
+    if (pts.length < 2) return '<div class="empty">Not enough price points to draw a chart.</div>';
+    var vals = [];
+    series.forEach(function (p) { if (p.value != null) vals.push(p.value); if (p.benchValue != null) vals.push(p.benchValue); });
+    var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+    if (min === max) { min *= 0.95; max *= 1.05; }
+    var n = series.length;
+    function xAt(i) { return pad + (i / Math.max(1, n - 1)) * (W - 2 * pad); }
+    function yAt(v) { return H - pad - ((v - min) / (max - min)) * (H - 2 * pad); }
+
+    function pathFor(field) {
+      var d = '', started = false;
+      series.forEach(function (p, i) {
+        var v = p[field];
+        if (v == null) { started = false; return; }
+        var cmd = started ? 'L' : 'M';
+        d += cmd + xAt(i).toFixed(1) + ',' + yAt(v).toFixed(1) + ' ';
+        started = true;
+      });
+      return d.trim();
+    }
+
+    var mainPath = pathFor('value');
+    var benchPath = series.some(function (p) { return p.benchValue != null; }) ? pathFor('benchValue') : null;
+
+    var first = series[0].date, last = series[series.length - 1].date;
+    var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
+    svg += '<line x1="' + pad + '" y1="' + (H - pad) + '" x2="' + (W - pad) + '" y2="' + (H - pad) + '" stroke="#2a3350" stroke-width="1"/>';
+    if (benchPath) svg += '<path d="' + benchPath + '" fill="none" stroke="#f59e0b" stroke-width="2" stroke-dasharray="5,4"/>';
+    svg += '<path d="' + mainPath + '" fill="none" stroke="#818cf8" stroke-width="2.5"/>';
+    svg += '<text x="' + pad + '" y="' + (H - 8) + '" font-size="10" fill="#8b93ab">' + escapeHTML(fmtDate(first)) + '</text>';
+    svg += '<text x="' + (W - pad) + '" y="' + (H - 8) + '" font-size="10" fill="#8b93ab" text-anchor="end">' + escapeHTML(fmtDate(last)) + '</text>';
+    svg += '<text x="' + pad + '" y="14" font-size="10" fill="#8b93ab">' + escapeHTML(fmtCurrency(max, currency)) + '</text>';
+    svg += '<text x="' + pad + '" y="' + (H - pad - 4) + '" font-size="10" fill="#8b93ab">' + escapeHTML(fmtCurrency(min, currency)) + '</text>';
+    svg += '</svg>';
+    return svg;
+  }
+
+  /* ---------------------------------------------------------------------
+   * Render: form pieces
+   * ------------------------------------------------------------------- */
+  var ASSET_TYPES = [
+    { v: 'stock', l: 'Stock' }, { v: 'bond', l: 'Bond' },
+    { v: 'etf', l: 'ETF' }, { v: 'index', l: 'Index Fund' }
+  ];
+  var FREQS = [
+    { v: 'weekly', l: 'Weekly' }, { v: 'monthly', l: 'Monthly' }, { v: 'quarterly', l: 'Quarterly' }
+  ];
+
+  function renderNewTab() {
+    var d = S.draft;
+    var html = '';
+
+    html += '<div class="card">';
+    html += '<h2>Security</h2>';
+    html += '<div class="row">';
+    html += '<div class="field"><label>Ticker</label><input type="text" data-bind="ticker" value="' + escapeHTML(d.ticker) + '" placeholder="AAPL" autocapitalize="characters"></div>';
+    html += '<div class="field"><label>Asset Type</label><select data-bind="assetType">' + ASSET_TYPES.map(function (t) {
+      return '<option value="' + t.v + '"' + (d.assetType === t.v ? ' selected' : '') + '>' + t.l + '</option>';
+    }).join('') + '</select></div>';
+    html += '</div>';
+    html += '<div class="field"><label>Currency (label only — no conversion is performed)</label><input type="text" data-bind="currency" value="' + escapeHTML(d.currency) + '" placeholder="USD"></div>';
+    html += '</div>';
+
+    html += '<div class="card">';
+    html += '<h2>Purchase</h2>';
+    html += '<div class="toggle-pill" data-role="mode-pill">';
+    html += '<button data-action="set-mode" data-value="lumpsum" class="' + (d.mode === 'lumpsum' ? 'active' : '') + '">Lump Sum</button>';
+    html += '<button data-action="set-mode" data-value="dca" class="' + (d.mode === 'dca' ? 'active' : '') + '">Recurring (DCA)</button>';
+    html += '</div>';
+    html += '<div class="divider"></div>';
+
+    if (d.mode === 'lumpsum') {
+      html += '<div class="row">';
+      html += '<div class="field"><label>Amount</label><input type="number" min="0" step="0.01" data-bind="lumpsum.amount" value="' + d.lumpsum.amount + '"></div>';
+      html += '<div class="field"><label>Buy Date</label><input type="date" data-bind="lumpsum.buyDate" value="' + d.lumpsum.buyDate + '" max="' + todayISO() + '"></div>';
+      html += '</div>';
+    } else {
+      html += '<div class="row">';
+      html += '<div class="field"><label>Amount per contribution</label><input type="number" min="0" step="0.01" data-bind="dca.amount" value="' + d.dca.amount + '"></div>';
+      html += '<div class="field"><label>Frequency</label><select data-bind="dca.frequency">' + FREQS.map(function (f) {
+        return '<option value="' + f.v + '"' + (d.dca.frequency === f.v ? ' selected' : '') + '>' + f.l + '</option>';
+      }).join('') + '</select></div>';
+      html += '</div>';
+      html += '<div class="row">';
+      html += '<div class="field"><label>Start Date</label><input type="date" data-bind="dca.startDate" value="' + d.dca.startDate + '" max="' + todayISO() + '"></div>';
+      html += '<div class="field"><label>End Date</label><input type="date" data-bind="dca.endDate" value="' + d.dca.endDate + '" max="' + todayISO() + '"></div>';
+      html += '</div>';
+      html += '<div class="hint">' + contributionDates(d).length + ' contributions scheduled.</div>';
+    }
+
+    html += '<div class="field" style="margin-top:12px"><label>Sell / Value Date</label><input type="date" data-bind="sellDate" value="' + d.sellDate + '" max="' + todayISO() + '"></div>';
+    html += '<div class="hint">Defaults to today; set an earlier date to see what selling on a specific day would have looked like.</div>';
+    html += '</div>';
+
+    if (d.assetType === 'bond') {
+      html += '<div class="card">';
+      html += '<h2>Bond Details</h2>';
+      html += '<div class="row">';
+      html += '<div class="field"><label>Annual Coupon Rate (%)</label><input type="number" min="0" step="0.01" data-bind="bond.couponRate" value="' + d.bond.couponRate + '"></div>';
+      html += '<div class="field"><label>Face Value</label><input type="number" min="0" step="0.01" data-bind="bond.faceValue" value="' + d.bond.faceValue + '"></div>';
+      html += '</div>';
+      html += '<div class="hint">Coupon income is estimated as a simple (non-compounding) accrual: face value × coupon rate × years held, shown alongside price return.</div>';
+      html += '</div>';
+    }
+
+    html += '<div class="card">';
+    html += '<h2>Benchmark</h2>';
+    html += '<div class="checkrow"><input type="checkbox" id="bench-cb" data-bind="benchmark.enabled"' + (d.benchmark.enabled ? ' checked' : '') + '><label for="bench-cb">Compare against a benchmark ticker</label></div>';
+    if (d.benchmark.enabled) {
+      html += '<div class="field" style="margin-top:10px"><label>Benchmark Ticker</label><input type="text" data-bind="benchmark.ticker" value="' + escapeHTML(d.benchmark.ticker) + '" placeholder="SPY"></div>';
+    }
+    html += '</div>';
+
+    html += '<button class="primary" data-action="run" ' + (S.loading ? 'disabled' : '') + '>' + (S.loading ? '<span class="spinner"></span>Looking up prices…' : 'Run What-If') + '</button>';
+
+    if (S.activeResult) html += renderResult();
+
+    return html;
+  }
+
+  function renderResult() {
+    var d = S.draft, r = S.activeResult, b = r.base;
+    var gainClass = b.gainAbs >= 0 ? 'pos' : 'neg';
+    var html = '<div class="card">';
+    html += '<h2>Result</h2>';
+    html += '<div class="stat-grid">';
+    html += stat('Invested', fmtCurrency(b.investedTotal, d.currency));
+    html += stat('Current Value', fmtCurrency(b.currentValue, d.currency));
+    html += stat('Gain / Loss', fmtCurrency(b.gainAbs, d.currency), gainClass);
+    html += stat('Return', fmtPercent(b.gainPct), gainClass);
+    if (d.mode === 'dca') {
+      html += stat('Avg Cost / Share', fmtCurrency(b.avgCost, d.currency));
+      html += stat('Contributions', String(b.contributions.length));
+    } else {
+      html += stat('Buy Price', fmtCurrency(b.avgCost, d.currency));
+      html += stat('Sell Price', fmtCurrency(b.sellPrice, d.currency));
+    }
+    html += '</div>';
+
+    if (r.bond) {
+      html += '<div class="divider"></div>';
+      html += '<div class="section-label">Bond Income</div>';
+      html += '<div class="stat-grid">';
+      html += stat('Coupon Income (est.)', fmtCurrency(r.bond.couponIncome, d.currency));
+      html += stat('Holding Period', r.bond.years.toFixed(2) + ' yrs');
+      html += stat('Total Return (price + coupon)', fmtCurrency(r.bond.totalReturnAbs, d.currency), r.bond.totalReturnAbs >= 0 ? 'pos' : 'neg');
+      html += stat('Total Return %', fmtPercent(r.bond.totalReturnPct), r.bond.totalReturnPct >= 0 ? 'pos' : 'neg');
+      html += '</div>';
+    }
+
+    html += '<div class="divider"></div>';
+    html += '<div class="chart-wrap">' + renderChartSVG(r.chartSeries, d.currency) + '</div>';
+    if (r.benchBase) {
+      html += '<div class="legend"><span><i></i>' + escapeHTML(d.ticker) + '</span><span><i class="bench"></i>' + escapeHTML(d.benchmark.ticker) + '</span></div>';
+      html += '<div class="divider"></div>';
+      html += '<div class="section-label">vs. ' + escapeHTML(d.benchmark.ticker) + '</div>';
+      html += '<div class="stat-grid">';
+      html += stat(d.benchmark.ticker + ' Return', fmtPercent(r.benchBase.gainPct), r.benchBase.gainPct >= 0 ? 'pos' : 'neg');
+      var diff = b.gainPct - r.benchBase.gainPct;
+      html += stat(diff >= 0 ? 'Outperformed by' : 'Underperformed by', fmtPercent(Math.abs(diff)).replace('+', ''), diff >= 0 ? 'pos' : 'neg');
+      html += '</div>';
+    }
+
+    html += '<div class="btn-row"><button class="secondary" data-action="save-scenario">Save Scenario</button></div>';
+    html += '</div>';
+    return html;
+  }
+
+  function stat(label, value, cls) {
+    return '<div class="stat"><div class="label">' + escapeHTML(label) + '</div><div class="value' + (cls ? ' ' + cls : '') + '">' + value + '</div></div>';
+  }
+
+  function renderHistoryTab() {
+    if (S.scenarios.length === 0) return '<div class="empty">No saved scenarios yet.<br>Run a what-if and tap "Save Scenario" to keep it here.</div>';
+    var html = '';
+    S.scenarios.forEach(function (sc) {
+      var b = sc.result.base;
+      var cls = b.gainAbs >= 0 ? 'pos' : 'neg';
+      html += '<div class="scenario-item" data-action="load-scenario" data-id="' + sc.id + '">';
+      html += '<div class="top"><span class="ticker">' + escapeHTML(sc.draft.ticker) + '</span><span class="badge ' + cls + '">' + fmtPercent(b.gainPct) + '</span></div>';
+      html += '<div class="meta">' + (sc.draft.mode === 'dca' ? 'DCA' : 'Lump sum') + ' · ' + escapeHTML(sc.draft.assetType) + ' · sold ' + fmtDate(sc.draft.sellDate) + '</div>';
+      html += '<div class="meta">Invested ' + fmtCurrency(b.investedTotal, sc.draft.currency) + ' → ' + fmtCurrency(b.currentValue, sc.draft.currency) + '</div>';
+      html += '<div class="actions"><button class="secondary danger" data-action="delete-scenario" data-id="' + sc.id + '">Delete</button></div>';
+      html += '</div>';
+    });
+    return html;
+  }
+
+  function renderSettingsTab() {
+    var s = S.settings;
+    var html = '<div class="card">';
+    html += '<h2>LLM Endpoint (price oracle)</h2>';
+    html += '<div class="field"><label>Base URL</label><input type="text" data-bind="settings.baseUrl" value="' + escapeHTML(s.baseUrl) + '" placeholder="https://api.openai.com/v1"></div>';
+    html += '<div class="field"><label>API Key</label><input type="password" data-bind="settings.apiKey" value="' + escapeHTML(s.apiKey) + '" placeholder="sk-…"></div>';
+    html += '<div class="field"><label>Model</label><input type="text" data-bind="settings.model" value="' + escapeHTML(s.model) + '" placeholder="gpt-4o-mini"></div>';
+    html += '<div class="hint">Requests go straight from your browser to <code>{Base URL}/chat/completions</code> with an <code>Authorization: Bearer</code> header — nothing passes through a server you don\'t control. Some providers block direct browser (CORS) requests entirely; if calls fail immediately with a network error, that\'s the provider\'s CORS policy, not a bug here, and there\'s no backend in this app to route around it.</div>';
+    html += '<div class="btn-row"><button class="secondary" data-action="test-connection" ' + (S.loading ? 'disabled' : '') + '>Test Connection</button></div>';
+    html += '</div>';
+
+    html += '<div class="card">';
+    html += '<h2>Data</h2>';
+    html += '<div class="hint">Looked-up prices are cached locally so re-running or reloading a scenario doesn\'t re-query the model. ' + Object.keys(S.priceCache).length + ' price points cached.</div>';
+    html += '<div class="btn-row"><button class="secondary danger" data-action="clear-cache">Clear Price Cache</button></div>';
+    html += '</div>';
+
+    html += '<div class="card"><h2>About</h2><div class="hint">Everything here — settings, scenarios, cached prices — lives only in this browser\'s localStorage. There is no backend and no database. The LLM is used solely as a historical price lookup; all return, DCA, and gain/loss math is computed locally in JavaScript.</div></div>';
+    return html;
+  }
+
+  /* ---------------------------------------------------------------------
+   * Top-level render
+   * ------------------------------------------------------------------- */
+  var TABS = [
+    { v: 'new', l: 'New', ic: '＋' },
+    { v: 'history', l: 'History', ic: '☰' },
+    { v: 'settings', l: 'Settings', ic: '⚙' }
+  ];
+
+  function renderHeader() {
+    var titles = { new: 'What-If', history: 'History', settings: 'Settings' };
+    return '<header class="topbar"><div class="brand"><span class="dot"></span>Playground · ' + titles[S.tab] + '</div></header>';
+  }
+
+  function renderBottomNav() {
+    return '<nav class="bottomnav">' + TABS.map(function (t) {
+      return '<button class="nav-btn ' + (S.tab === t.v ? 'active' : '') + '" data-action="set-tab" data-value="' + t.v + '"><span class="ic">' + t.ic + '</span>' + t.l + '</button>';
+    }).join('') + '</nav>';
+  }
+
+  function render() {
+    var body = S.tab === 'new' ? renderNewTab() : S.tab === 'history' ? renderHistoryTab() : renderSettingsTab();
+    document.getElementById('app').innerHTML =
+      renderHeader() +
+      '<main class="scroll">' + body + '</main>' +
+      renderBottomNav();
+  }
+
+  /* ---------------------------------------------------------------------
+   * Event delegation
+   * ------------------------------------------------------------------- */
+  function onClick(e) {
+    var el = e.target.closest('[data-action]');
+    if (!el) return;
+    var action = el.dataset.action;
+    if (action === 'set-tab') { S.tab = el.dataset.value; render(); }
+    else if (action === 'set-mode') { S.draft.mode = el.dataset.value; render(); }
+    else if (action === 'run') { runScenario(); }
+    else if (action === 'save-scenario') { saveScenario(); }
+    else if (action === 'load-scenario') { loadScenario(el.dataset.id); }
+    else if (action === 'delete-scenario') { e.stopPropagation(); if (confirm('Delete this saved scenario?')) deleteScenario(el.dataset.id); }
+    else if (action === 'test-connection') { testConnection(); }
+    else if (action === 'clear-cache') { if (confirm('Clear all cached prices?')) clearCache(); }
+  }
+
+  function onFormChange(e) {
+    var el = e.target.closest('[data-bind]');
+    if (!el) return;
+    var path = el.dataset.bind;
+    var value;
+    if (el.type === 'checkbox') value = el.checked;
+    else if (el.type === 'number') value = el.value === '' ? 0 : Number(el.value);
+    else value = el.value;
+
+    if (path.indexOf('settings.') === 0) { setPath(S, path, value); saveSettings(); return; }
+    setPath(S.draft, path, value);
+
+    var structural = path === 'assetType' || path === 'benchmark.enabled';
+    if (structural) render();
+  }
+
+  /* ---------------------------------------------------------------------
+   * Init
+   * ------------------------------------------------------------------- */
+  function init() {
+    loadState();
+    document.getElementById('app').addEventListener('click', onClick);
+    document.getElementById('app').addEventListener('input', onFormChange);
+    document.getElementById('app').addEventListener('change', onFormChange);
+    render();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
