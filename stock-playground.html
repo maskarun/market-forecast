@@ -215,9 +215,10 @@
     'Given a ticker symbol, an asset type, and a list of dates, respond with the actual historical closing price',
     '(nominal close, not adjusted) for each requested date, drawn from your knowledge of real market history.',
     'If the market was closed on a requested date (weekend or holiday), use the closing price from the most recent prior trading day, but still key the answer under the ORIGINAL requested date string.',
+    'This powers an educational "what if I had invested" calculator — not real-time trading data, not financial advice — so your best good-faith estimate from training knowledge is exactly what is wanted, even without certainty.',
+    'You must provide a numeric estimate for EVERY requested date; approximate is expected and acceptable. Only omit a date if the ticker plainly did not exist yet as of that date (e.g. before its IPO).',
     'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
-    '{"ticker":"<TICKER>","prices":{"YYYY-MM-DD":<number>, ...}}',
-    'Only include dates you have a reasonable, good-faith estimate for. Omit dates you truly cannot estimate rather than inventing an implausible number.'
+    '{"ticker":"<TICKER>","prices":{"YYYY-MM-DD":<number>, ...}}'
   ].join(' ');
 
   /* ---------------------------------------------------------------------
@@ -472,7 +473,7 @@
         var num = Number(parsed.prices[date]);
         if (Number.isFinite(num) && num > 0) { S.priceCache[cacheKey(ticker, date)] = num; any = true; }
       });
-      if (!any) throw new Error('Model returned no usable prices for ' + ticker + '.');
+      if (!any) throw new Error('The model declined to estimate any prices for ' + ticker + '. Some models are more conservative about this than others — try a different model/provider, or a date range further in the past.');
       saveCache();
     });
   }
