@@ -137,6 +137,25 @@
 
   .empty { text-align: center; padding: 40px 20px; color: var(--text-faint); font-size: 13px; }
 
+  .rank-item {
+    display: flex; align-items: center; gap: 11px;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px 12px; margin-bottom: 8px; cursor: pointer;
+  }
+  .rank-item:hover { border-color: var(--accent); }
+  .rank-num {
+    flex: 0 0 26px; height: 26px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-2);
+    display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .rank-body { flex: 1 1 auto; min-width: 0; }
+  .rank-ticker { font-size: 14px; font-weight: 700; }
+  .rank-name { font-size: 11px; color: var(--text-dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rank-ret { flex: 0 0 auto; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .rank-ret.pos { color: var(--green); }
+  .rank-ret.neg { color: var(--red); }
+  .stale { color: var(--amber); }
+
   nav.bottomnav {
     flex: 0 0 auto; height: calc(var(--nav-h) + var(--safe-bottom)); display: flex; border-top: 1px solid var(--border);
     background: var(--bg); position: sticky; bottom: 0; z-index: 10; padding-bottom: var(--safe-bottom);
@@ -182,7 +201,8 @@
   var STORE = {
     settings: 'stockplay.settings.v1',
     scenarios: 'stockplay.scenarios.v1',
-    cache: 'stockplay.pricecache.v1'
+    cache: 'stockplay.pricecache.v1',
+    toplists: 'stockplay.toplists.v1'
   };
 
   var PROVIDERS = {
@@ -221,6 +241,17 @@
     '{"ticker":"<TICKER>","prices":{"YYYY-MM-DD":<number>, ...}}'
   ].join(' ');
 
+  var TOP_SYSTEM_PROMPT = [
+    'You are a market reference for an educational investing sandbox — not live market data and not financial advice.',
+    'Given a category and a lookback period, list the ten best-performing widely-recognized securities in that category by approximate total return over that period, drawn from your training knowledge.',
+    'Categories: "stocks" = individual listed equities; "index" = index funds / index-tracking ETFs; "mutual" = actively managed mutual funds.',
+    'Prefer well-known, currently-listed, broadly available securities a retail investor could actually buy, and use each one\'s real ticker symbol.',
+    'Give your best good-faith estimate even without certainty; approximate figures are expected and acceptable.',
+    'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
+    '{"items":[{"ticker":"<TICKER>","name":"<full name>","returnPct":<number>}]}',
+    'returnPct is the total percentage return across the whole period, not annualized. Return exactly 10 items, best first.'
+  ].join(' ');
+
   /* ---------------------------------------------------------------------
    * State singleton
    * ------------------------------------------------------------------- */
@@ -253,7 +284,10 @@
     priceCache: {},
     loading: false,
     activeResult: null,
-    activeError: null
+    activeError: null,
+    top: { category: 'stocks', period: '1y' },
+    topLists: {},
+    topLoading: false
   };
 
   /* ---------------------------------------------------------------------
@@ -290,10 +324,12 @@
     if (migrated !== storedRaw) saveSettings();
     S.scenarios = loadJSON(STORE.scenarios, []);
     S.priceCache = loadJSON(STORE.cache, {});
+    S.topLists = loadJSON(STORE.toplists, {});
   }
   function saveSettings() { saveJSON(STORE.settings, S.settings); }
   function saveScenarios() { saveJSON(STORE.scenarios, S.scenarios); }
   function saveCache() { saveJSON(STORE.cache, S.priceCache); }
+  function saveTopLists() { saveJSON(STORE.toplists, S.topLists); }
 
   /* ---------------------------------------------------------------------
    * Small utilities
@@ -667,6 +703,45 @@
   }
 
   /* ---------------------------------------------------------------------
+   * Top-10 leaderboards. Unlike historical prices (fixed facts), "best
+   * performers" is a question about current data, so results are only as
+   * fresh as the model's training cutoff — surfaced in the UI, not hidden.
+   * ------------------------------------------------------------------- */
+  function topKey(category, period) { return category + '|' + period; }
+
+  function fetchTopList() {
+    var t = S.top;
+    var key = topKey(t.category, t.period);
+    S.topLoading = true; render();
+    var userContent = JSON.stringify({ category: t.category, period: t.period === '5y' ? '5 years' : '1 year' });
+    llmChatRequest(TOP_SYSTEM_PROMPT, userContent).then(function (content) {
+      var parsed = extractJSON(content);
+      if (!parsed || !Array.isArray(parsed.items)) throw new Error('Could not parse a top-10 list from the model response.');
+      var items = parsed.items.slice(0, 10).map(function (it) {
+        return {
+          ticker: String(it.ticker == null ? '' : it.ticker).trim().toUpperCase(),
+          name: String(it.name == null ? '' : it.name).trim(),
+          returnPct: Number(it.returnPct)
+        };
+      }).filter(function (it) { return it.ticker; });
+      if (!items.length) throw new Error('The model returned no usable entries for this list.');
+      S.topLists[key] = { fetchedAt: new Date().toISOString(), items: items };
+      saveTopLists();
+      toast('success', 'Loaded ' + items.length + ' results.');
+    }).catch(function (err) {
+      toast('error', err.message || 'Failed to load the list.');
+    }).then(function () { S.topLoading = false; render(); });
+  }
+
+  function useTicker(ticker) {
+    S.draft.ticker = ticker;
+    S.activeResult = null;
+    S.tab = 'new';
+    render();
+    toast('success', ticker + ' loaded into the What-If form.');
+  }
+
+  /* ---------------------------------------------------------------------
    * Toasts
    * ------------------------------------------------------------------- */
   function toast(type, message) {
@@ -856,6 +931,53 @@
     return '<div class="stat"><div class="label">' + escapeHTML(label) + '</div><div class="value' + (cls ? ' ' + cls : '') + '">' + value + '</div></div>';
   }
 
+  var TOP_CATEGORIES = [
+    { v: 'stocks', l: 'Stocks' }, { v: 'index', l: 'Index Funds' }, { v: 'mutual', l: 'Mutual Funds' }
+  ];
+  var TOP_PERIODS = [{ v: '1y', l: '1 Year' }, { v: '5y', l: '5 Years' }];
+
+  function renderTopTab() {
+    var t = S.top;
+    var entry = S.topLists[topKey(t.category, t.period)];
+    var periodLabel = t.period === '5y' ? '5-year' : '1-year';
+    var html = '';
+
+    html += '<div class="card">';
+    html += '<h2>Category</h2>';
+    html += '<div class="toggle-pill">' + TOP_CATEGORIES.map(function (c) {
+      return '<button data-action="set-top-category" data-value="' + c.v + '" class="' + (t.category === c.v ? 'active' : '') + '">' + c.l + '</button>';
+    }).join('') + '</div>';
+    html += '<div class="divider"></div>';
+    html += '<h2>Period</h2>';
+    html += '<div class="toggle-pill">' + TOP_PERIODS.map(function (p) {
+      return '<button data-action="set-top-period" data-value="' + p.v + '" class="' + (t.period === p.v ? 'active' : '') + '">' + p.l + '</button>';
+    }).join('') + '</div>';
+    html += '<div class="hint">Rankings come from the language model\'s training knowledge, not a live market feed — treat them as a rough, possibly out-of-date starting point for exploration. Past performance says nothing about future results, and none of this is financial advice.</div>';
+    html += '<div class="btn-row"><button class="primary" data-action="fetch-top" ' + (S.topLoading ? 'disabled' : '') + '>' +
+      (S.topLoading ? '<span class="spinner"></span>Loading…' : (entry ? 'Refresh List' : 'Load Top 10')) + '</button></div>';
+    html += '</div>';
+
+    if (entry) {
+      html += '<div class="card">';
+      html += '<h2>Top 10 · ' + escapeHTML(TOP_CATEGORIES.filter(function (c) { return c.v === t.category; })[0].l) + ' · ' + periodLabel + '</h2>';
+      html += entry.items.map(function (it, i) {
+        var pctCls = Number.isFinite(it.returnPct) ? (it.returnPct >= 0 ? 'pos' : 'neg') : '';
+        return '<div class="rank-item" data-action="use-ticker" data-ticker="' + escapeHTML(it.ticker) + '">' +
+          '<div class="rank-num">' + (i + 1) + '</div>' +
+          '<div class="rank-body"><div class="rank-ticker">' + escapeHTML(it.ticker) + '</div>' +
+          (it.name ? '<div class="rank-name">' + escapeHTML(it.name) + '</div>' : '') + '</div>' +
+          '<div class="rank-ret ' + pctCls + '">' + (Number.isFinite(it.returnPct) ? fmtPercent(it.returnPct) : '—') + '</div>' +
+          '</div>';
+      }).join('');
+      html += '<div class="hint">Tap any row to load that ticker into the What-If tab. Fetched ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
+      html += '</div>';
+    } else if (!S.topLoading) {
+      html += '<div class="empty">No list loaded yet.<br>Pick a category and period, then tap "Load Top 10".</div>';
+    }
+
+    return html;
+  }
+
   function renderHistoryTab() {
     if (S.scenarios.length === 0) return '<div class="empty">No saved scenarios yet.<br>Run a what-if and tap "Save Scenario" to keep it here.</div>';
     var html = '';
@@ -910,12 +1032,13 @@
    * ------------------------------------------------------------------- */
   var TABS = [
     { v: 'new', l: 'New', ic: '＋' },
+    { v: 'top', l: 'Top 10', ic: '★' },
     { v: 'history', l: 'History', ic: '☰' },
     { v: 'settings', l: 'Settings', ic: '⚙' }
   ];
 
   function renderHeader() {
-    var titles = { new: 'What-If', history: 'History', settings: 'Settings' };
+    var titles = { new: 'What-If', top: 'Top 10', history: 'History', settings: 'Settings' };
     return '<header class="topbar"><div class="brand"><span class="dot"></span>Playground · ' + titles[S.tab] + '</div></header>';
   }
 
@@ -926,7 +1049,10 @@
   }
 
   function render() {
-    var body = S.tab === 'new' ? renderNewTab() : S.tab === 'history' ? renderHistoryTab() : renderSettingsTab();
+    var body = S.tab === 'new' ? renderNewTab()
+      : S.tab === 'top' ? renderTopTab()
+      : S.tab === 'history' ? renderHistoryTab()
+      : renderSettingsTab();
     document.getElementById('app').innerHTML =
       renderHeader() +
       '<main class="scroll">' + body + '</main>' +
@@ -948,6 +1074,10 @@
     else if (action === 'delete-scenario') { e.stopPropagation(); if (confirm('Delete this saved scenario?')) deleteScenario(el.dataset.id); }
     else if (action === 'test-connection') { testConnection(); }
     else if (action === 'clear-cache') { if (confirm('Clear all cached prices?')) clearCache(); }
+    else if (action === 'set-top-category') { S.top.category = el.dataset.value; render(); }
+    else if (action === 'set-top-period') { S.top.period = el.dataset.value; render(); }
+    else if (action === 'fetch-top') { fetchTopList(); }
+    else if (action === 'use-ticker') { useTicker(el.dataset.ticker); }
   }
 
   function onProviderChange(newProviderKey) {
