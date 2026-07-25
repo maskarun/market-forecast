@@ -202,7 +202,8 @@
     settings: 'stockplay.settings.v1',
     scenarios: 'stockplay.scenarios.v1',
     cache: 'stockplay.pricecache.v1',
-    toplists: 'stockplay.toplists.v1'
+    toplists: 'stockplay.toplists.v1',
+    topprefs: 'stockplay.topprefs.v1'
   };
 
   var PROVIDERS = {
@@ -237,15 +238,18 @@
     'If the market was closed on a requested date (weekend or holiday), use the closing price from the most recent prior trading day, but still key the answer under the ORIGINAL requested date string.',
     'This powers an educational "what if I had invested" calculator — not real-time trading data, not financial advice — so your best good-faith estimate from training knowledge is exactly what is wanted, even without certainty.',
     'You must provide a numeric estimate for EVERY requested date; approximate is expected and acceptable. Only omit a date if the ticker plainly did not exist yet as of that date (e.g. before its IPO).',
+    'Quote every price in the security\'s primary listing currency (INR for NSE/BSE-listed securities, USD for US-listed); never convert between currencies.',
     'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
     '{"ticker":"<TICKER>","prices":{"YYYY-MM-DD":<number>, ...}}'
   ].join(' ');
 
   var TOP_SYSTEM_PROMPT = [
     'You are a market reference for an educational investing sandbox — not live market data and not financial advice.',
-    'Given a category and a lookback period, list the ten best-performing widely-recognized securities in that category by approximate total return over that period, drawn from your training knowledge.',
+    'Given a market, a category and a lookback period, list the ten best-performing widely-recognized securities in that category by approximate total return over that period, drawn from your training knowledge.',
     'Categories: "stocks" = individual listed equities; "index" = index funds / index-tracking ETFs; "mutual" = actively managed mutual funds.',
     'Prefer well-known, currently-listed, broadly available securities a retail investor could actually buy, and use each one\'s real ticker symbol.',
+    'Return ONLY securities actually listed and traded in the requested market, using that market\'s conventional ticker symbols — e.g. NSE symbols such as RELIANCE, TCS or INFY for India, and NYSE/NASDAQ symbols for the US.',
+    'Indian mutual fund schemes have no exchange ticker: for those, put a short recognizable scheme identifier in "ticker" and the full scheme name in "name".',
     'Give your best good-faith estimate even without certainty; approximate figures are expected and acceptable.',
     'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
     '{"items":[{"ticker":"<TICKER>","name":"<full name>","returnPct":<number>}]}',
@@ -285,7 +289,7 @@
     loading: false,
     activeResult: null,
     activeError: null,
-    top: { category: 'stocks', period: '1y' },
+    top: { market: 'in', category: 'stocks', period: '1y' },
     topLists: {},
     topLoading: false
   };
@@ -317,6 +321,17 @@
     }
     return { provider: raw.provider || 'openai', url: url, apiKey: raw.apiKey || '' };
   }
+  // Top-list keys gained a market segment; anything still on the old two-segment
+  // shape predates the selector and was implicitly a US-market list.
+  function migrateTopLists(raw) {
+    if (!raw) return {};
+    var out = {}, changed = false;
+    Object.keys(raw).forEach(function (k) {
+      if (k.split('|').length === 2) { out['us|' + k] = raw[k]; changed = true; }
+      else out[k] = raw[k];
+    });
+    return changed ? out : raw;
+  }
   function loadState() {
     var storedRaw = loadJSON(STORE.settings, {});
     var migrated = migrateSettings(storedRaw);
@@ -324,12 +339,16 @@
     if (migrated !== storedRaw) saveSettings();
     S.scenarios = loadJSON(STORE.scenarios, []);
     S.priceCache = loadJSON(STORE.cache, {});
-    S.topLists = loadJSON(STORE.toplists, {});
+    var rawTop = loadJSON(STORE.toplists, {});
+    S.topLists = migrateTopLists(rawTop);
+    if (S.topLists !== rawTop) saveTopLists();
+    S.top = Object.assign({}, S.top, loadJSON(STORE.topprefs, {}));
   }
   function saveSettings() { saveJSON(STORE.settings, S.settings); }
   function saveScenarios() { saveJSON(STORE.scenarios, S.scenarios); }
   function saveCache() { saveJSON(STORE.cache, S.priceCache); }
   function saveTopLists() { saveJSON(STORE.toplists, S.topLists); }
+  function saveTopPrefs() { saveJSON(STORE.topprefs, S.top); }
 
   /* ---------------------------------------------------------------------
    * Small utilities
@@ -707,13 +726,17 @@
    * performers" is a question about current data, so results are only as
    * fresh as the model's training cutoff — surfaced in the UI, not hidden.
    * ------------------------------------------------------------------- */
-  function topKey(category, period) { return category + '|' + period; }
+  function topKey(market, category, period) { return market + '|' + category + '|' + period; }
 
   function fetchTopList() {
     var t = S.top;
-    var key = topKey(t.category, t.period);
+    var key = topKey(t.market, t.category, t.period);
     S.topLoading = true; render();
-    var userContent = JSON.stringify({ category: t.category, period: t.period === '5y' ? '5 years' : '1 year' });
+    var userContent = JSON.stringify({
+      market: topOption(TOP_MARKETS, t.market).prompt,
+      category: t.category,
+      period: topOption(TOP_PERIODS, t.period).prompt
+    });
     llmChatRequest(TOP_SYSTEM_PROMPT, userContent).then(function (content) {
       var parsed = extractJSON(content);
       if (!parsed || !Array.isArray(parsed.items)) throw new Error('Could not parse a top-10 list from the model response.');
@@ -733,8 +756,11 @@
     }).then(function () { S.topLoading = false; render(); });
   }
 
+  // Only ever invoked from a Top-tab row, so the selected market determines the
+  // currency label the What-If form should carry over.
   function useTicker(ticker) {
     S.draft.ticker = ticker;
+    S.draft.currency = topOption(TOP_MARKETS, S.top.market).currency;
     S.activeResult = null;
     S.tab = 'new';
     render();
@@ -934,15 +960,28 @@
   var TOP_CATEGORIES = [
     { v: 'stocks', l: 'Stocks' }, { v: 'index', l: 'Index Funds' }, { v: 'mutual', l: 'Mutual Funds' }
   ];
-  var TOP_PERIODS = [{ v: '1y', l: '1 Year' }, { v: '5y', l: '5 Years' }];
+  var TOP_MARKETS = [
+    { v: 'in', l: 'India', prompt: 'India (securities listed on the NSE or BSE)', currency: 'INR' },
+    { v: 'us', l: 'US', prompt: 'the United States (securities listed on the NYSE or NASDAQ)', currency: 'USD' }
+  ];
+  var TOP_PERIODS = [
+    { v: '6m', l: '6 Months', prompt: 'the last 6 months', label: '6-month' },
+    { v: '1y', l: '1 Year', prompt: 'the last 1 year', label: '1-year' },
+    { v: '5y', l: '5 Years', prompt: 'the last 5 years', label: '5-year' }
+  ];
+  function topOption(list, value) { return list.filter(function (o) { return o.v === value; })[0] || list[0]; }
 
   function renderTopTab() {
     var t = S.top;
-    var entry = S.topLists[topKey(t.category, t.period)];
-    var periodLabel = t.period === '5y' ? '5-year' : '1-year';
+    var entry = S.topLists[topKey(t.market, t.category, t.period)];
     var html = '';
 
     html += '<div class="card">';
+    html += '<h2>Market</h2>';
+    html += '<div class="toggle-pill">' + TOP_MARKETS.map(function (m) {
+      return '<button data-action="set-top-market" data-value="' + m.v + '" class="' + (t.market === m.v ? 'active' : '') + '">' + m.l + '</button>';
+    }).join('') + '</div>';
+    html += '<div class="divider"></div>';
     html += '<h2>Category</h2>';
     html += '<div class="toggle-pill">' + TOP_CATEGORIES.map(function (c) {
       return '<button data-action="set-top-category" data-value="' + c.v + '" class="' + (t.category === c.v ? 'active' : '') + '">' + c.l + '</button>';
@@ -959,7 +998,8 @@
 
     if (entry) {
       html += '<div class="card">';
-      html += '<h2>Top 10 · ' + escapeHTML(TOP_CATEGORIES.filter(function (c) { return c.v === t.category; })[0].l) + ' · ' + periodLabel + '</h2>';
+      html += '<h2>Top 10 · ' + escapeHTML(topOption(TOP_MARKETS, t.market).l) + ' · ' +
+        escapeHTML(topOption(TOP_CATEGORIES, t.category).l) + ' · ' + topOption(TOP_PERIODS, t.period).label + '</h2>';
       html += entry.items.map(function (it, i) {
         var pctCls = Number.isFinite(it.returnPct) ? (it.returnPct >= 0 ? 'pos' : 'neg') : '';
         return '<div class="rank-item" data-action="use-ticker" data-ticker="' + escapeHTML(it.ticker) + '">' +
@@ -972,7 +1012,7 @@
       html += '<div class="hint">Tap any row to load that ticker into the What-If tab. Fetched ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
       html += '</div>';
     } else if (!S.topLoading) {
-      html += '<div class="empty">No list loaded yet.<br>Pick a category and period, then tap "Load Top 10".</div>';
+      html += '<div class="empty">No list loaded yet.<br>Pick a market, category and period, then tap "Load Top 10".</div>';
     }
 
     return html;
@@ -1074,8 +1114,9 @@
     else if (action === 'delete-scenario') { e.stopPropagation(); if (confirm('Delete this saved scenario?')) deleteScenario(el.dataset.id); }
     else if (action === 'test-connection') { testConnection(); }
     else if (action === 'clear-cache') { if (confirm('Clear all cached prices?')) clearCache(); }
-    else if (action === 'set-top-category') { S.top.category = el.dataset.value; render(); }
-    else if (action === 'set-top-period') { S.top.period = el.dataset.value; render(); }
+    else if (action === 'set-top-market') { S.top.market = el.dataset.value; saveTopPrefs(); render(); }
+    else if (action === 'set-top-category') { S.top.category = el.dataset.value; saveTopPrefs(); render(); }
+    else if (action === 'set-top-period') { S.top.period = el.dataset.value; saveTopPrefs(); render(); }
     else if (action === 'fetch-top') { fetchTopList(); }
     else if (action === 'use-ticker') { useTicker(el.dataset.ticker); }
   }
