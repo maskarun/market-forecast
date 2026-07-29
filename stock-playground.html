@@ -156,6 +156,46 @@
   .rank-ret.neg { color: var(--red); }
   .stale { color: var(--amber); }
 
+  /* --- SWP planner --- */
+  .acc-hdr {
+    display: flex; align-items: center; justify-content: space-between; width: 100%;
+    background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 0;
+    font-size: 13px; text-transform: uppercase; letter-spacing: .06em; font-weight: 700;
+  }
+  .acc-hdr .chev { transition: transform .15s; font-size: 11px; color: var(--text-faint); }
+  .acc-hdr[aria-expanded="true"] .chev { transform: rotate(90deg); }
+  .acc-body { margin-top: 14px; }
+  .err { font-size: 11px; color: var(--red); margin-top: 5px; }
+  input.bad, select.bad { border-color: var(--red); }
+
+  .gap-viz { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px; }
+  .gap-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .gap-lbl { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
+  .gap-gross { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .gap-bar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; margin: 10px 0 8px; background: var(--bg); }
+  .gap-bar i.net { background: var(--green); }
+  .gap-bar i.ded { background: var(--red); }
+  .gap-ded { font-size: 12px; color: var(--red); font-variant-numeric: tabular-nums; }
+  .gap-net-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
+  .gap-net { font-size: 27px; font-weight: 800; color: var(--green); font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+
+  .tbl-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+  table.tbl { border-collapse: collapse; width: 100%; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.tbl th, table.tbl td { padding: 6px 9px; text-align: right; border-bottom: 1px solid var(--border); }
+  table.tbl th { background: var(--surface-2); color: var(--text-dim); font-weight: 700; position: sticky; top: 0; text-transform: uppercase; font-size: 10px; letter-spacing: .04em; }
+  table.tbl td:first-child, table.tbl th:first-child { text-align: left; }
+  table.tbl tbody tr:last-child td { border-bottom: none; }
+  table.tbl td.pos { color: var(--green); }
+  table.tbl td.neg { color: var(--red); }
+  .heat { text-align: center; font-weight: 700; color: var(--text); }
+  .lot-row { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 8px; }
+  .lot-row .field { flex: 1; margin-bottom: 0; }
+  .lot-del { flex: 0 0 auto; background: var(--surface-2); border: 1px solid var(--border); color: var(--red); border-radius: var(--radius-sm); padding: 10px 11px; font-size: 13px; cursor: pointer; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+  }
+
   nav.bottomnav {
     flex: 0 0 auto; height: calc(var(--nav-h) + var(--safe-bottom)); display: flex; border-top: 1px solid var(--border);
     background: var(--bg); position: sticky; bottom: 0; z-index: 10; padding-bottom: var(--safe-bottom);
@@ -203,8 +243,40 @@
     scenarios: 'stockplay.scenarios.v1',
     cache: 'stockplay.pricecache.v1',
     toplists: 'stockplay.toplists.v1',
-    topprefs: 'stockplay.topprefs.v1'
+    topprefs: 'stockplay.topprefs.v1',
+    swp: 'stockplay.swp.v1'
   };
+
+  /* ---------------------------------------------------------------------
+   * SWP fund categories. `tax` picks the rate set; `hold` picks which
+   * holding-period threshold applies. Debt bought on/after 1 Apr 2023 is
+   * taxed at slab regardless of how long it is held, so it has no
+   * long-term classification at all.
+   * ------------------------------------------------------------------- */
+  var SWP_CATEGORIES = [
+    { v: 'equity', l: 'Equity (>65% equity)', tax: 'equity', hold: 'eq' },
+    { v: 'hybrid_eq', l: 'Hybrid — equity-taxed', tax: 'equity', hold: 'eq' },
+    { v: 'hybrid_debt', l: 'Hybrid — debt-taxed', tax: 'debt', hold: 'other' },
+    { v: 'debt_new', l: 'Debt (bought on/after 1 Apr 2023)', tax: 'slab_always', hold: null },
+    { v: 'debt_legacy', l: 'Debt (legacy, pre 1 Apr 2023)', tax: 'debt', hold: 'other' },
+    { v: 'arbitrage', l: 'Arbitrage', tax: 'equity', hold: 'eq' }
+  ];
+  var SWP_FREQS = [
+    { v: 'monthly', l: 'Monthly', perYear: 12, months: 1 },
+    { v: 'quarterly', l: 'Quarterly', perYear: 4, months: 3 },
+    { v: 'annual', l: 'Annual', perYear: 1, months: 12 }
+  ];
+
+  // Placeholders only — Indian rates move at every Budget. The UI says so and
+  // every field here is user-editable, per the spec's insistence.
+  function defaultRates() {
+    return {
+      eqStcg: 20, eqLtcg: 12.5, ltcgExemption: 125000,
+      debtSlab: 30, cess: 4,
+      eqHoldMonths: 12, otherHoldMonths: 24,
+      surcharge: [{ over: 5000000, pct: 10 }, { over: 10000000, pct: 15 }]
+    };
+  }
 
   var PROVIDERS = {
     openai: { label: 'OpenAI', style: 'openai', defaultUrl: 'https://api.openai.com/v1/chat/completions?model=gpt-4o-mini' },
@@ -291,8 +363,37 @@
     activeError: null,
     top: { market: 'in', category: 'stocks', period: '1y' },
     topLists: {},
-    topLoading: false
+    topLoading: false,
+    swp: defaultSwp()
   };
+
+  function defaultSwp() {
+    return {
+      entryMode: 'lump',
+      lots: [{ id: uid(), units: 10000, nav: 100, date: yearsAgoISO(3) }],
+      lump: { amount: 5000000, nav: 100, date: yearsAgoISO(3) },
+      // The engine grows a single live NAV; the per-lot NAVs above are cost basis only.
+      currentNav: 150,
+      category: 'equity',
+      returns: { pess: 6, base: 10, opt: 13 },
+      volatility: { enabled: false, stdev: 15 },
+      amount: 50000,
+      amountMode: 'net',
+      frequency: 'monthly',
+      startDate: todayISO(),
+      horizonYears: 20,
+      escalation: 0,
+      residency: 'nri',
+      transitionEnabled: false,
+      transitionDate: '',
+      rates: defaultRates(),
+      sec197: { enabled: false, rate: 0 },
+      dtaa: { enabled: false, rate: 0 },
+      exitLoad: { pct: 1, days: 365 },
+      openSections: { corpus: true, withdrawal: true, tax: false },
+      ledgerExpanded: false
+    };
+  }
 
   /* ---------------------------------------------------------------------
    * Persistence
@@ -343,12 +444,26 @@
     S.topLists = migrateTopLists(rawTop);
     if (S.topLists !== rawTop) saveTopLists();
     S.top = Object.assign({}, S.top, loadJSON(STORE.topprefs, {}));
+    S.swp = mergeSwp(loadJSON(STORE.swp, null));
+  }
+  // Shallow-merge would drop defaults for any nested field added after a save,
+  // so the known sub-objects are merged individually.
+  function mergeSwp(saved) {
+    var d = defaultSwp();
+    if (!saved || typeof saved !== 'object') return d;
+    var out = Object.assign({}, d, saved);
+    ['returns', 'volatility', 'rates', 'sec197', 'dtaa', 'exitLoad', 'lump', 'openSections'].forEach(function (k) {
+      out[k] = Object.assign({}, d[k], saved[k] || {});
+    });
+    if (!Array.isArray(out.lots) || !out.lots.length) out.lots = d.lots;
+    return out;
   }
   function saveSettings() { saveJSON(STORE.settings, S.settings); }
   function saveScenarios() { saveJSON(STORE.scenarios, S.scenarios); }
   function saveCache() { saveJSON(STORE.cache, S.priceCache); }
   function saveTopLists() { saveJSON(STORE.toplists, S.topLists); }
   function saveTopPrefs() { saveJSON(STORE.topprefs, S.top); }
+  function saveSwp() { saveJSON(STORE.swp, S.swp); }
 
   /* ---------------------------------------------------------------------
    * Small utilities
@@ -768,6 +883,280 @@
   }
 
   /* ---------------------------------------------------------------------
+   * SWP engine. Entirely deterministic and offline — no LLM, no API.
+   * The whole point is that gross ≠ net for an NRI, so every rupee of
+   * exit load and TDS is tracked per instalment, per FIFO lot slice.
+   * ------------------------------------------------------------------- */
+  function swpCategory(cfg) { return topOption(SWP_CATEGORIES, cfg.category); }
+  function swpFreq(cfg) { return topOption(SWP_FREQS, cfg.frequency); }
+
+  function monthsBetween(fromIso, toIso) {
+    var a = parseISO(fromIso), b = parseISO(toIso);
+    var m = (b.getUTCFullYear() - a.getUTCFullYear()) * 12 + (b.getUTCMonth() - a.getUTCMonth());
+    if (b.getUTCDate() < a.getUTCDate()) m--;
+    return m;
+  }
+  function daysBetween(fromIso, toIso) {
+    return Math.round((parseISO(toIso).getTime() - parseISO(fromIso).getTime()) / 86400000);
+  }
+  // Indian financial year runs 1 Apr – 31 Mar; FY 2025 means 2025-04-01..2026-03-31.
+  function finYearOf(iso) {
+    var d = parseISO(iso);
+    return d.getUTCMonth() >= 3 ? d.getUTCFullYear() : d.getUTCFullYear() - 1;
+  }
+  function finYearLabel(fy) { return 'FY ' + fy + '–' + String(fy + 1).slice(2); }
+
+  // Lots normalised to {units, nav (cost basis), date}, oldest first for FIFO.
+  function swpLots(cfg) {
+    var list;
+    if (cfg.entryMode === 'lump') {
+      var nav = Number(cfg.lump.nav) || 0;
+      list = [{ units: nav > 0 ? (Number(cfg.lump.amount) || 0) / nav : 0, nav: nav, date: cfg.lump.date }];
+    } else {
+      list = (cfg.lots || []).map(function (l) {
+        return { units: Number(l.units) || 0, nav: Number(l.nav) || 0, date: l.date };
+      });
+    }
+    return list.filter(function (l) { return l.units > 0 && l.nav > 0 && l.date; })
+      .sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+  }
+  function swpCorpusValue(cfg) {
+    var units = swpLots(cfg).reduce(function (s, l) { return s + l.units; }, 0);
+    return units * (Number(cfg.currentNav) || 0);
+  }
+
+  // Spec: with a transition set, before it apply NRI rules, on/after apply resident.
+  function swpIsNriOn(cfg, date) {
+    if (cfg.transitionEnabled && cfg.transitionDate) return date < cfg.transitionDate;
+    return cfg.residency === 'nri';
+  }
+  function isLongTerm(cat, holdMonths, rates) {
+    if (!cat.hold) return false; // debt bought on/after 1 Apr 2023: slab always
+    var threshold = cat.hold === 'eq' ? Number(rates.eqHoldMonths) : Number(rates.otherHoldMonths);
+    return holdMonths >= threshold;
+  }
+  function baseRateFor(cat, isLong, rates) {
+    if (cat.tax === 'slab_always') return Number(rates.debtSlab) || 0;
+    if (cat.tax === 'equity') return Number(isLong ? rates.eqLtcg : rates.eqStcg) || 0;
+    return Number(rates.debtSlab) || 0;
+  }
+  // Surcharge keys off cumulative FY gains, not the single instalment — charging it
+  // per instalment would understate the deduction at higher gain levels.
+  function surchargePct(slabs, fyGains) {
+    var pct = 0;
+    (slabs || []).forEach(function (s) {
+      if (fyGains > Number(s.over)) pct = Math.max(pct, Number(s.pct) || 0);
+    });
+    return pct;
+  }
+
+  /* Non-mutating: the net-mode solver calls this repeatedly for one instalment.
+     Caller applies the returned unit deductions. */
+  function simulateRedemption(gross, lots, nav, date, cfg, exemptionLeft, fyGains) {
+    var cat = swpCategory(cfg), rates = cfg.rates;
+    var remaining = nav > 0 ? gross / nav : 0;
+    var slices = [], cost = 0, stGain = 0, ltGain = 0, exitLoad = 0, units = 0;
+    for (var i = 0; i < lots.length && remaining > 1e-9; i++) {
+      if (lots[i].units <= 1e-9) continue;
+      var take = Math.min(lots[i].units, remaining);
+      remaining -= take; units += take;
+      var proceeds = take * nav, basis = take * lots[i].nav, gain = proceeds - basis;
+      var lt = isLongTerm(cat, monthsBetween(lots[i].date, date), rates);
+      var load = daysBetween(lots[i].date, date) < (Number(cfg.exitLoad.days) || 0)
+        ? proceeds * (Number(cfg.exitLoad.pct) || 0) / 100 : 0;
+      cost += basis; exitLoad += load;
+      if (lt) ltGain += gain; else stGain += gain;
+      slices.push({ lot: i, units: take, basis: basis, gain: gain, lt: lt, load: load });
+    }
+    // LTCG annual exemption applies to equity-taxed long-term gains.
+    var exemptionUsed = 0, taxableLt = ltGain;
+    if (cat.tax === 'equity' && ltGain > 0) {
+      exemptionUsed = Math.min(exemptionLeft, ltGain);
+      taxableLt = ltGain - exemptionUsed;
+    }
+    var taxableSt = Math.max(0, stGain);
+    taxableLt = Math.max(0, taxableLt);
+    var tax;
+    if (cfg.sec197.enabled || cfg.dtaa.enabled) {
+      // A certificate/treaty rate is the all-in deduction; no surcharge or cess on top.
+      var ovr = Number(cfg.sec197.enabled ? cfg.sec197.rate : cfg.dtaa.rate) || 0;
+      tax = (taxableSt + taxableLt) * ovr / 100;
+    } else {
+      var base = taxableSt * baseRateFor(cat, false, rates) / 100
+        + taxableLt * baseRateFor(cat, true, rates) / 100;
+      var sur = surchargePct(rates.surcharge, fyGains + taxableSt + taxableLt);
+      tax = base * (1 + sur / 100) * (1 + (Number(rates.cess) || 0) / 100);
+    }
+    var actualGross = units * nav;
+    var isNri = swpIsNriOn(cfg, date);
+    return {
+      slices: slices, units: units, gross: actualGross, cost: cost,
+      stGain: stGain, ltGain: ltGain, exemptionUsed: exemptionUsed,
+      exitLoad: exitLoad, liability: tax, tds: isNri ? tax : 0,
+      net: actualGross - exitLoad - (isNri ? tax : 0), isNri: isNri,
+      short: remaining > 1e-9
+    };
+  }
+
+  // net(gross) is monotonic increasing, so plain bisection is safe.
+  function solveGrossForNet(targetNet, lots, nav, date, cfg, exemptionLeft, fyGains) {
+    var netOf = function (g) {
+      return simulateRedemption(g, lots, nav, date, cfg, exemptionLeft, fyGains).net;
+    };
+    var lo = 0, hi = Math.max(targetNet, 1) * 1.5;
+    for (var k = 0; k < 40 && netOf(hi) < targetNet; k++) hi *= 1.5;
+    for (var i = 0; i < 32; i++) {
+      var mid = (lo + hi) / 2;
+      if (netOf(mid) < targetNet) lo = mid; else hi = mid;
+    }
+    return hi;
+  }
+
+  function runSwp(cfg, annualReturn, opts) {
+    opts = opts || {};
+    var freq = swpFreq(cfg);
+    var lots = swpLots(cfg).map(function (l) { return { units: l.units, nav: l.nav, date: l.date }; });
+    var periods = Math.max(1, Math.round((Number(cfg.horizonYears) || 0) * freq.perYear));
+    var amount = opts.amount != null ? opts.amount : (Number(cfg.amount) || 0);
+    var mode = opts.mode || cfg.amountMode;
+    var nav = Number(cfg.currentNav) || 0;
+    var escal = (Number(cfg.escalation) || 0) / 100;
+    var ledger = [], depletion = null, depletionIndex = null;
+    var fy = null, exemptionLeft = 0, fyGains = 0;
+
+    for (var i = 0; i < periods; i++) {
+      var date = i === 0 ? cfg.startDate : addMonths(cfg.startDate, i * freq.months);
+      if (i > 0) nav *= Math.pow(1 + (opts.sampler ? opts.sampler(i) : annualReturn) / 100, 1 / freq.perYear);
+
+      var unitsLeft = lots.reduce(function (s, l) { return s + l.units; }, 0);
+      if (unitsLeft <= 1e-9) { depletion = depletion || date; depletionIndex = depletionIndex == null ? i : depletionIndex; break; }
+
+      var thisFy = finYearOf(date);
+      if (thisFy !== fy) { fy = thisFy; exemptionLeft = Number(cfg.rates.ltcgExemption) || 0; fyGains = 0; }
+
+      var target = amount * Math.pow(1 + escal, Math.floor(i / freq.perYear));
+      var gross = mode === 'net'
+        ? solveGrossForNet(target, lots, nav, date, cfg, exemptionLeft, fyGains)
+        : target;
+      var r = simulateRedemption(gross, lots, nav, date, cfg, exemptionLeft, fyGains);
+
+      // Apply the redemption to the real lots.
+      r.slices.forEach(function (s) { lots[s.lot].units -= s.units; });
+      exemptionLeft -= r.exemptionUsed;
+      fyGains += Math.max(0, r.stGain) + Math.max(0, r.ltGain - r.exemptionUsed);
+
+      var remainingUnits = lots.reduce(function (s, l) { return s + l.units; }, 0);
+      ledger.push({
+        i: i, date: date, fy: thisFy, nav: nav, gross: r.gross, units: r.units,
+        cost: r.cost, stGain: r.stGain, ltGain: r.ltGain, exemptionUsed: r.exemptionUsed,
+        exitLoad: r.exitLoad, tds: r.tds, liability: r.liability, net: r.net,
+        isNri: r.isNri, remainingUnits: remainingUnits, remainingValue: remainingUnits * nav
+      });
+
+      if (remainingUnits <= 1e-9) { depletion = date; depletionIndex = i; break; }
+    }
+
+    var last = ledger[ledger.length - 1];
+    return {
+      ledger: ledger,
+      depletion: depletion,
+      yearsToDepletion: depletionIndex == null ? null : (depletionIndex + 1) / freq.perYear,
+      endingValue: last ? last.remainingValue : swpCorpusValue(cfg),
+      survives: depletion == null
+    };
+  }
+
+  function swpAnnualSummary(ledger) {
+    var byFy = {};
+    ledger.forEach(function (row) {
+      var e = byFy[row.fy] || (byFy[row.fy] = {
+        fy: row.fy, gross: 0, stGain: 0, ltGain: 0, exemptionUsed: 0,
+        exitLoad: 0, tds: 0, liability: 0, net: 0
+      });
+      e.gross += row.gross; e.stGain += row.stGain; e.ltGain += row.ltGain;
+      e.exemptionUsed += row.exemptionUsed; e.exitLoad += row.exitLoad;
+      e.tds += row.tds; e.liability += row.liability; e.net += row.net;
+    });
+    return Object.keys(byFy).sort(function (a, b) { return a - b; }).map(function (k) {
+      var e = byFy[k];
+      e.refund = e.tds - e.liability; // positive ⇒ over-deducted ⇒ refund due
+      return e;
+    });
+  }
+
+  // Largest withdrawal that still leaves the corpus intact at the horizon.
+  function swpMaxSustainable(cfg, annualReturn) {
+    var corpus = swpCorpusValue(cfg);
+    if (corpus <= 0) return 0;
+    var lo = 0, hi = corpus / Math.max(1, swpFreq(cfg).perYear);
+    for (var i = 0; i < 28; i++) {
+      var mid = (lo + hi) / 2;
+      if (runSwp(cfg, annualReturn, { amount: mid }).survives) lo = mid; else hi = mid;
+    }
+    return lo;
+  }
+
+  function gaussian() {
+    var u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+  // Returns are drawn per period, not once per path: sequence-of-returns risk is
+  // the whole reason this number is interesting for a withdrawal plan.
+  function swpMonteCarlo(cfg, paths) {
+    paths = paths || 500;
+    var mean = Number(cfg.returns.base) || 0, sd = Number(cfg.volatility.stdev) || 0;
+    var survived = 0;
+    for (var p = 0; p < paths; p++) {
+      if (runSwp(cfg, mean, { sampler: function () { return mean + sd * gaussian(); } }).survives) survived++;
+    }
+    return survived / paths * 100;
+  }
+
+  var SWP_SENS_W = [3, 4, 5, 6, 7, 8];
+  var SWP_SENS_R = [4, 6, 8, 10, 12, 14];
+  // Gross mode deliberately: the rows *are* a gross withdrawal rate, and nesting the
+  // net solver inside 36 cells × N periods would stall live recalculation.
+  function swpSensitivity(cfg) {
+    var corpus = swpCorpusValue(cfg), perYear = swpFreq(cfg).perYear;
+    return SWP_SENS_W.map(function (w) {
+      return SWP_SENS_R.map(function (r) {
+        var out = runSwp(cfg, r, { amount: corpus * (w / 100) / perYear, mode: 'gross' });
+        return out.survives ? null : out.yearsToDepletion;
+      });
+    });
+  }
+
+  function validateSwp(cfg) {
+    var errs = {};
+    if (cfg.entryMode === 'lump') {
+      if (!(Number(cfg.lump.amount) > 0)) errs['lump.amount'] = 'Enter an amount greater than 0.';
+      if (!(Number(cfg.lump.nav) > 0)) errs['lump.nav'] = 'Purchase NAV must be greater than 0.';
+      if (!cfg.lump.date) errs['lump.date'] = 'Pick a purchase date.';
+    } else if (!swpLots(cfg).length) {
+      errs.lots = 'Add at least one lot with units, NAV and date all greater than 0.';
+    }
+    if (!(Number(cfg.currentNav) > 0)) errs.currentNav = 'Current NAV must be greater than 0.';
+    if (!(Number(cfg.amount) > 0)) errs.amount = 'Withdrawal amount must be greater than 0.';
+    if (!(Number(cfg.horizonYears) > 0)) errs.horizonYears = 'Horizon must be at least 1 year.';
+    if (Number(cfg.horizonYears) > 60) errs.horizonYears = 'Horizon above 60 years is not meaningful — lower it.';
+    if (!cfg.startDate) errs.startDate = 'Pick a start date.';
+    if (Number(cfg.escalation) < 0) errs.escalation = 'Escalation cannot be negative.';
+    if (Number(cfg.exitLoad.pct) < 0) errs['exitLoad.pct'] = 'Exit load cannot be negative.';
+    if (Number(cfg.exitLoad.days) < 0) errs['exitLoad.days'] = 'Exit load period cannot be negative.';
+    if (cfg.transitionEnabled && !cfg.transitionDate) errs.transitionDate = 'Pick a transition date or turn the toggle off.';
+    if (cfg.volatility.enabled && !(Number(cfg.volatility.stdev) > 0)) errs['volatility.stdev'] = 'Volatility must be greater than 0.';
+    ['eqStcg', 'eqLtcg', 'debtSlab', 'cess', 'ltcgExemption'].forEach(function (k) {
+      if (Number(cfg.rates[k]) < 0) errs['rates.' + k] = 'Cannot be negative.';
+    });
+    ['eqHoldMonths', 'otherHoldMonths'].forEach(function (k) {
+      if (!(Number(cfg.rates[k]) > 0)) errs['rates.' + k] = 'Holding period must be greater than 0.';
+    });
+    return errs;
+  }
+
+  /* ---------------------------------------------------------------------
    * Toasts
    * ------------------------------------------------------------------- */
   function toast(type, message) {
@@ -1018,6 +1407,352 @@
     return html;
   }
 
+  /* ---------------------------------------------------------------------
+   * SWP planner UI. Three zones on one page: controls, the gross-vs-net
+   * headline (the whole point of the tool), then detail.
+   * ------------------------------------------------------------------- */
+  function fmtINR(n, dec) {
+    if (!Number.isFinite(n)) return '—';
+    return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: dec || 0 }).format(n);
+  }
+  // Numeric fields deliberately use text + inputmode rather than type=number:
+  // type=number forbids selectionStart, so the caret cannot be restored across the
+  // live re-render and characters get dropped mid-typing. Values are kept as raw
+  // strings; every engine call site already coerces with Number().
+  function swpNumAttrs() { return 'type="text" inputmode="decimal" autocomplete="off"'; }
+  function swpInput(label, sub, errs, opts) {
+    opts = opts || {};
+    var v = getPath(S.swp, sub);
+    var err = errs[sub];
+    var attrs = opts.type === 'date'
+      ? 'type="date"' + (opts.max ? ' max="' + opts.max + '"' : '')
+      : swpNumAttrs();
+    return '<div class="field"><label>' + escapeHTML(label) + '</label>' +
+      '<input ' + attrs + ' data-bind="swp.' + sub + '"' +
+      ' value="' + escapeHTML(v == null ? '' : String(v)) + '"' + (err ? ' class="bad"' : '') + '>' +
+      (err ? '<div class="err">' + escapeHTML(err) + '</div>' : '') + '</div>';
+  }
+  function swpSection(key, title, body) {
+    var open = !!S.swp.openSections[key];
+    return '<div class="card">' +
+      '<button class="acc-hdr" data-action="swp-toggle-section" data-key="' + key + '" aria-expanded="' + open + '">' +
+      '<span>' + escapeHTML(title) + '</span><span class="chev">▶</span></button>' +
+      (open ? '<div class="acc-body">' + body + '</div>' : '') + '</div>';
+  }
+  function swpPill(action, list, current) {
+    return '<div class="toggle-pill">' + list.map(function (o) {
+      return '<button data-action="' + action + '" data-value="' + o.v + '" class="' + (current === o.v ? 'active' : '') + '">' + escapeHTML(o.l) + '</button>';
+    }).join('') + '</div>';
+  }
+
+  function renderSwpControls(c, errs) {
+    var html = '';
+
+    // ---- Corpus ----
+    var corpus = '';
+    corpus += swpPill('swp-entry-mode', [{ v: 'lump', l: 'Lump sum' }, { v: 'lots', l: 'Multiple lots' }], c.entryMode);
+    corpus += '<div class="divider"></div>';
+    if (c.entryMode === 'lump') {
+      corpus += '<div class="row">' + swpInput('Amount invested', 'lump.amount', errs) + swpInput('NAV at purchase', 'lump.nav', errs, { step: '0.0001' }) + '</div>';
+      corpus += swpInput('Purchase date', 'lump.date', errs, { type: 'date', max: todayISO() });
+    } else {
+      corpus += (c.lots || []).map(function (l, i) {
+        return '<div class="lot-row">' +
+          '<div class="field"><label>Units</label><input ' + swpNumAttrs() + ' data-bind="swp.lots.' + i + '.units" value="' + escapeHTML(String(l.units)) + '"></div>' +
+          '<div class="field"><label>NAV</label><input ' + swpNumAttrs() + ' data-bind="swp.lots.' + i + '.nav" value="' + escapeHTML(String(l.nav)) + '"></div>' +
+          '<div class="field"><label>Purchased</label><input type="date" data-bind="swp.lots.' + i + '.date" value="' + escapeHTML(l.date || '') + '" max="' + todayISO() + '"></div>' +
+          (c.lots.length > 1 ? '<button class="lot-del" data-action="swp-remove-lot" data-index="' + i + '" title="Remove lot">✕</button>' : '') +
+          '</div>';
+      }).join('');
+      if (errs.lots) corpus += '<div class="err">' + escapeHTML(errs.lots) + '</div>';
+      corpus += '<div class="btn-row"><button class="secondary" data-action="swp-add-lot">+ Add lot</button></div>';
+    }
+    corpus += '<div class="divider"></div>';
+    corpus += '<div class="row">' + swpInput('Current NAV', 'currentNav', errs, { step: '0.0001' }) +
+      '<div class="field"><label>Fund category</label><select data-bind="swp.category">' + SWP_CATEGORIES.map(function (x) {
+        return '<option value="' + x.v + '"' + (c.category === x.v ? ' selected' : '') + '>' + escapeHTML(x.l) + '</option>';
+      }).join('') + '</select></div></div>';
+    corpus += '<div class="hint">Corpus today: <strong>' + fmtINR(swpCorpusValue(c)) + '</strong> · ' +
+      swpLots(c).reduce(function (s, l) { return s + l.units; }, 0).toFixed(3) + ' units</div>';
+    corpus += '<div class="divider"></div>';
+    corpus += '<div class="section-label">Expected annual return</div>';
+    corpus += '<div class="row">' + swpInput('Pessimistic %', 'returns.pess', errs, { step: '0.1' }) +
+      swpInput('Base %', 'returns.base', errs, { step: '0.1' }) + swpInput('Optimistic %', 'returns.opt', errs, { step: '0.1' }) + '</div>';
+    corpus += '<div class="checkrow" style="margin-top:12px"><input type="checkbox" id="swp-vol" data-bind="swp.volatility.enabled"' + (c.volatility.enabled ? ' checked' : '') + '><label for="swp-vol">Run a Monte Carlo on volatility</label></div>';
+    if (c.volatility.enabled) corpus += '<div style="margin-top:10px">' + swpInput('Annual volatility (std dev %)', 'volatility.stdev', errs, { step: '0.1' }) + '</div>';
+    html += swpSection('corpus', 'Corpus', corpus);
+
+    // ---- Withdrawal ----
+    var wd = '';
+    wd += swpPill('swp-amount-mode', [{ v: 'net', l: 'Net (what I receive)' }, { v: 'gross', l: 'Gross (units sold)' }], c.amountMode);
+    wd += '<div class="hint">Net mode solves backwards for the redemption that credits this much <em>after</em> TDS — the thing most calculators skip.</div>';
+    wd += '<div class="divider"></div>';
+    wd += '<div class="row">' + swpInput('Amount per instalment', 'amount', errs) +
+      '<div class="field"><label>Frequency</label><select data-bind="swp.frequency">' + SWP_FREQS.map(function (f) {
+        return '<option value="' + f.v + '"' + (c.frequency === f.v ? ' selected' : '') + '>' + f.l + '</option>';
+      }).join('') + '</select></div></div>';
+    wd += '<div class="row">' + swpInput('Start date', 'startDate', errs, { type: 'date' }) + swpInput('Horizon (years)', 'horizonYears', errs) + '</div>';
+    wd += swpInput('Annual escalation %', 'escalation', errs, { step: '0.1' });
+    html += swpSection('withdrawal', 'Withdrawal', wd);
+
+    // ---- Tax & residency ----
+    var tx = '';
+    tx += '<div class="section-label">Residency</div>';
+    tx += swpPill('swp-residency', [{ v: 'nri', l: 'NRI' }, { v: 'resident', l: 'Resident' }], c.residency);
+    tx += '<div class="checkrow" style="margin-top:12px"><input type="checkbox" id="swp-trans" data-bind="swp.transitionEnabled"' + (c.transitionEnabled ? ' checked' : '') + '><label for="swp-trans">I change residency mid-plan</label></div>';
+    if (c.transitionEnabled) {
+      tx += '<div style="margin-top:10px">' + swpInput('Transition date (NRI before, resident on/after)', 'transitionDate', errs, { type: 'date' }) + '</div>';
+    }
+    tx += '<div class="divider"></div>';
+    tx += '<div class="section-label">Tax rates</div>';
+    tx += '<div class="hint stale">⚠ These are placeholders from training knowledge, not verified current law. Indian rates move at almost every Budget — check equity STCG/LTCG, the LTCG exemption, NRI surcharge thresholds, cess and holding periods against the current Finance Act before trusting any number below.</div>';
+    tx += '<div class="row">' + swpInput('Equity STCG %', 'rates.eqStcg', errs, { step: '0.1' }) + swpInput('Equity LTCG %', 'rates.eqLtcg', errs, { step: '0.1' }) + '</div>';
+    tx += '<div class="row">' + swpInput('LTCG annual exemption', 'rates.ltcgExemption', errs) + swpInput('Debt / slab %', 'rates.debtSlab', errs, { step: '0.1' }) + '</div>';
+    tx += '<div class="row">' + swpInput('Cess %', 'rates.cess', errs, { step: '0.1' }) + swpInput('Equity holding (months)', 'rates.eqHoldMonths', errs) + '</div>';
+    tx += swpInput('Other-asset holding (months)', 'rates.otherHoldMonths', errs);
+    tx += '<div class="hint">NRI surcharge: ' + (c.rates.surcharge || []).map(function (s) {
+      return s.pct + '% over ' + fmtINR(s.over);
+    }).join(', ') + ' — applied on cumulative gains within each financial year, with cess on top.</div>';
+    tx += '<div class="divider"></div>';
+    tx += '<div class="checkrow"><input type="checkbox" id="swp-197" data-bind="swp.sec197.enabled"' + (c.sec197.enabled ? ' checked' : '') + '><label for="swp-197">Sec 197 lower/nil deduction certificate</label></div>';
+    if (c.sec197.enabled) tx += '<div style="margin-top:10px">' + swpInput('Certificate rate %', 'sec197.rate', errs, { step: '0.01' }) + '</div>';
+    tx += '<div class="checkrow" style="margin-top:12px"><input type="checkbox" id="swp-dtaa" data-bind="swp.dtaa.enabled"' + (c.dtaa.enabled ? ' checked' : '') + '><label for="swp-dtaa">DTAA relief</label></div>';
+    if (c.dtaa.enabled) tx += '<div style="margin-top:10px">' + swpInput('Treaty rate %', 'dtaa.rate', errs, { step: '0.01' }) + '</div>';
+    if (c.sec197.enabled || c.dtaa.enabled) tx += '<div class="hint">An override replaces the whole deduction — base rate, surcharge and cess included.</div>';
+    tx += '<div class="divider"></div>';
+    tx += '<div class="section-label">Exit load</div>';
+    tx += '<div class="row">' + swpInput('Load %', 'exitLoad.pct', errs, { step: '0.01' }) + swpInput('Applies within (days)', 'exitLoad.days', errs) + '</div>';
+    html += swpSection('tax', 'Tax & residency', tx);
+
+    return html;
+  }
+
+  function renderSwpHeadline(c, runs) {
+    var base = runs.base, first = base.ledger[0];
+    if (!first) return '<div class="empty">This plan redeems nothing — check the corpus and withdrawal amount.</div>';
+    var deduction = first.exitLoad + first.tds;
+    var netPct = first.gross > 0 ? Math.max(0, first.net) / first.gross * 100 : 0;
+    var year1 = base.ledger.filter(function (r) { return r.i < swpFreq(c).perYear; });
+    var y1 = year1.reduce(function (a, r) { return { g: a.g + r.gross, d: a.d + r.exitLoad + r.tds, n: a.n + r.net }; }, { g: 0, d: 0, n: 0 });
+
+    var html = '<div class="card">';
+    html += '<h2>What actually reaches you</h2>';
+    html += '<div class="gap-viz">';
+    html += '<div class="gap-row"><span class="gap-lbl">Gross redemption</span><span class="gap-gross">' + fmtINR(first.gross) + '</span></div>';
+    html += '<div class="gap-bar"><i class="net" style="width:' + netPct.toFixed(2) + '%"></i><i class="ded" style="width:' + (100 - netPct).toFixed(2) + '%"></i></div>';
+    html += '<div class="gap-ded">− ' + fmtINR(deduction) + ' deducted &nbsp;·&nbsp; TDS ' + fmtINR(first.tds) + ' · exit load ' + fmtINR(first.exitLoad) + '</div>';
+    html += '<div class="gap-net-row"><span class="gap-lbl">Lands in your bank</span><span class="gap-net">' + fmtINR(first.net) + '</span></div>';
+    html += '</div>';
+    html += '<div class="hint">First instalment (' + escapeHTML(fmtDate(first.date)) + '), ' + escapeHTML(swpFreq(c).l.toLowerCase()) + '.' +
+      (first.tds === 0 ? ' No TDS on this one — the LTCG annual exemption still covers the gain, so the gap opens later in the year.' : '') + '</div>';
+
+    // The first instalment can be deduction-free while the exemption lasts, so the
+    // first full year is the honest headline figure for the gap.
+    html += '<div class="divider"></div>';
+    html += '<div class="section-label">First 12 months</div>';
+    html += '<div class="stat-grid">';
+    html += stat('Redeemed', fmtINR(y1.g));
+    html += stat('Deducted', fmtINR(y1.d), y1.d > 0 ? 'neg' : '');
+    html += stat('Received', fmtINR(y1.n), 'pos');
+    html += stat('Lost to deduction', (y1.g > 0 ? (y1.d / y1.g * 100).toFixed(2) : '0.00') + '%', y1.d > 0 ? 'neg' : '');
+    html += '</div>';
+
+    html += '<div class="divider"></div>';
+    html += '<div class="section-label">How long the corpus lasts</div>';
+    html += '<div class="stat-grid">';
+    [['pess', 'Pessimistic'], ['base', 'Base'], ['opt', 'Optimistic']].forEach(function (p) {
+      var out = runs[p[0]];
+      html += stat(p[1] + ' · ' + Number(c.returns[p[0]]) + '%',
+        out.survives ? 'Survives' : fmtDate(out.depletion), out.survives ? 'pos' : 'neg');
+    });
+    html += stat('Ending balance (base)', fmtINR(runs.base.endingValue), runs.base.survives ? 'pos' : '');
+    html += '</div>';
+
+    if (c.transitionEnabled && c.transitionDate) {
+      var asNri = runSwp(Object.assign({}, c, { transitionEnabled: false, residency: 'nri' }), Number(c.returns.base));
+      var asRes = runSwp(Object.assign({}, c, { transitionEnabled: false, residency: 'resident' }), Number(c.returns.base));
+      var sumNet = function (o) { return o.ledger.reduce(function (s, r) { return s + r.net; }, 0); };
+      html += '<div class="divider"></div>';
+      html += '<div class="section-label">Same plan, either status</div>';
+      html += '<div class="stat-grid">';
+      html += stat('Total received as NRI', fmtINR(sumNet(asNri)));
+      html += stat('Total received as resident', fmtINR(sumNet(asRes)), 'pos');
+      html += stat('Cost of NRI status', fmtINR(sumNet(asRes) - sumNet(asNri)), 'neg');
+      html += stat('Transition', fmtDate(c.transitionDate));
+      html += '</div>';
+      html += '<div class="hint">Resident figures are what is credited; the tax still falls due at ITR time rather than being withheld per instalment.</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderSwpChart(c, runs) {
+    var series = [
+      { key: 'pess', color: '#f43f5e', out: runs.pess },
+      { key: 'base', color: '#818cf8', out: runs.base },
+      { key: 'opt', color: '#22c55e', out: runs.opt }
+    ];
+    var maxLen = Math.max.apply(null, series.map(function (s) { return s.out.ledger.length; }));
+    if (maxLen < 2) return '<div class="empty">Not enough instalments to chart.</div>';
+    var maxVal = Math.max.apply(null, series.map(function (s) {
+      return Math.max.apply(null, s.out.ledger.map(function (r) { return r.remainingValue; }).concat([0]));
+    }));
+    if (!(maxVal > 0)) maxVal = 1;
+    var W = 600, H = 220, pad = 30;
+    var xAt = function (i) { return pad + (i / Math.max(1, maxLen - 1)) * (W - 2 * pad); };
+    var yAt = function (v) { return H - pad - (v / maxVal) * (H - 2 * pad); };
+
+    var svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Corpus over time under three return scenarios">';
+    svg += '<line x1="' + pad + '" y1="' + (H - pad) + '" x2="' + (W - pad) + '" y2="' + (H - pad) + '" stroke="#2a3350"/>';
+
+    if (c.transitionEnabled && c.transitionDate) {
+      var ti = runs.base.ledger.findIndex(function (r) { return r.date >= c.transitionDate; });
+      if (ti > 0) {
+        svg += '<line x1="' + xAt(ti).toFixed(1) + '" y1="' + pad + '" x2="' + xAt(ti).toFixed(1) + '" y2="' + (H - pad) +
+          '" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="4,4"/>';
+        svg += '<text x="' + (xAt(ti) + 4).toFixed(1) + '" y="' + (pad + 10) + '" font-size="9" fill="#f59e0b">residency change</text>';
+      }
+    }
+    series.forEach(function (s) {
+      var d = s.out.ledger.map(function (r, i) { return (i ? 'L' : 'M') + xAt(i).toFixed(1) + ',' + yAt(r.remainingValue).toFixed(1); }).join(' ');
+      svg += '<path d="' + d + '" fill="none" stroke="' + s.color + '" stroke-width="2"/>';
+      if (!s.out.survives && s.out.ledger.length) {
+        var li = s.out.ledger.length - 1;
+        svg += '<circle cx="' + xAt(li).toFixed(1) + '" cy="' + yAt(s.out.ledger[li].remainingValue).toFixed(1) + '" r="3.5" fill="' + s.color + '"/>';
+      }
+    });
+    svg += '<text x="' + pad + '" y="14" font-size="10" fill="#8b93ab">' + escapeHTML(fmtINR(maxVal)) + '</text>';
+    svg += '<text x="' + pad + '" y="' + (H - 8) + '" font-size="10" fill="#8b93ab">' + escapeHTML(fmtDate(runs.base.ledger[0].date)) + '</text>';
+    svg += '<text x="' + (W - pad) + '" y="' + (H - 8) + '" font-size="10" fill="#8b93ab" text-anchor="end">+' + Math.round(maxLen / swpFreq(c).perYear) + 'y</text>';
+    svg += '</svg>';
+    return svg;
+  }
+
+  var SWP_LEDGER_COLS = [
+    ['Date', function (r) { return fmtDate(r.date); }],
+    ['NAV', function (r) { return r.nav.toFixed(2); }],
+    ['Gross', function (r) { return fmtINR(r.gross); }],
+    ['Units', function (r) { return r.units.toFixed(3); }],
+    ['Cost', function (r) { return fmtINR(r.cost); }],
+    ['ST gain', function (r) { return fmtINR(r.stGain); }],
+    ['LT gain', function (r) { return fmtINR(r.ltGain); }],
+    ['Exempt', function (r) { return fmtINR(r.exemptionUsed); }],
+    ['Load', function (r) { return fmtINR(r.exitLoad); }],
+    ['TDS', function (r) { return fmtINR(r.tds); }],
+    ['Net', function (r) { return fmtINR(r.net); }],
+    ['Units left', function (r) { return r.remainingUnits.toFixed(3); }],
+    ['Value left', function (r) { return fmtINR(r.remainingValue); }]
+  ];
+
+  function renderSwpDetail(c, runs) {
+    var base = runs.base;
+    var html = '<div class="card"><h2>Corpus over time</h2>';
+    html += '<div class="chart-wrap">' + renderSwpChart(c, runs) + '</div>';
+    html += '<div class="legend"><span><i style="background:#f43f5e"></i>Pessimistic</span><span><i style="background:#818cf8"></i>Base</span><span><i style="background:#22c55e"></i>Optimistic</span></div>';
+    html += '</div>';
+
+    // Ledger
+    var rows = c.ledgerExpanded ? base.ledger : base.ledger.slice(0, 24);
+    html += '<div class="card"><h2>Instalment ledger</h2>';
+    html += '<div class="tbl-wrap"><table class="tbl" id="swp-ledger"><thead><tr>' +
+      SWP_LEDGER_COLS.map(function (col) { return '<th>' + escapeHTML(col[0]) + '</th>'; }).join('') + '</tr></thead><tbody>';
+    html += rows.map(function (r) {
+      return '<tr>' + SWP_LEDGER_COLS.map(function (col, ci) {
+        var cls = col[0] === 'TDS' && r.tds > 0 ? ' class="neg"' : col[0] === 'Net' ? ' class="pos"' : '';
+        return '<td' + cls + '>' + escapeHTML(String(col[1](r))) + '</td>';
+      }).join('') + '</tr>';
+    }).join('');
+    html += '</tbody></table></div>';
+    html += '<div class="hint">Showing ' + rows.length + ' of ' + base.ledger.length + ' instalments (base scenario).</div>';
+    html += '<div class="btn-row">';
+    if (base.ledger.length > 24) html += '<button class="secondary" data-action="swp-toggle-ledger">' + (c.ledgerExpanded ? 'Show first 24' : 'Show all ' + base.ledger.length) + '</button>';
+    html += '<button class="secondary" data-action="swp-export-csv">Export CSV</button></div>';
+    html += '</div>';
+
+    // Annual reconciliation
+    var ann = swpAnnualSummary(base.ledger);
+    html += '<div class="card"><h2>Annual reconciliation</h2>';
+    html += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Year</th><th>Gross</th><th>ST gain</th><th>LT gain</th><th>Exempt</th><th>TDS paid</th><th>Liability</th><th>Refund</th></tr></thead><tbody>';
+    html += ann.map(function (e) {
+      return '<tr><td>' + escapeHTML(finYearLabel(e.fy)) + '</td><td>' + fmtINR(e.gross) + '</td><td>' + fmtINR(e.stGain) +
+        '</td><td>' + fmtINR(e.ltGain) + '</td><td>' + fmtINR(e.exemptionUsed) + '</td><td>' + fmtINR(e.tds) +
+        '</td><td>' + fmtINR(e.liability) + '</td><td class="' + (e.refund >= 0 ? 'pos' : 'neg') + '">' + fmtINR(e.refund) + '</td></tr>';
+    }).join('');
+    html += '</tbody></table></div>';
+    html += '<div class="hint">Refund = TDS withheld minus the liability once the annual LTCG exemption is applied. For an NRI drawing steadily this is usually positive — money you get back at ITR time.</div>';
+    html += '</div>';
+
+    // Sensitivity
+    var sens = swpSensitivity(c);
+    var horizon = Number(c.horizonYears) || 1;
+    html += '<div class="card"><h2>Sensitivity</h2>';
+    html += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Draw ↓ / Return →</th>' +
+      SWP_SENS_R.map(function (r) { return '<th>' + r + '%</th>'; }).join('') + '</tr></thead><tbody>';
+    html += SWP_SENS_W.map(function (w, wi) {
+      return '<tr><td>' + w + '%</td>' + sens[wi].map(function (yrs) {
+        var t = yrs == null ? 1 : Math.min(1, yrs / horizon);
+        var bg = 'hsla(' + Math.round(t * 140) + ',70%,45%,.32)';
+        return '<td class="heat" style="background:' + bg + '">' + (yrs == null ? '∞' : yrs.toFixed(1)) + '</td>';
+      }).join('') + '</tr>';
+    }).join('');
+    html += '</tbody></table></div>';
+    html += '<div class="hint">Years until the corpus is exhausted, by annual withdrawal rate (% of today\'s corpus) against annual return. ∞ means it outlasts the ' + horizon + '-year horizon. Computed on gross withdrawals.</div>';
+    html += '</div>';
+    return html;
+  }
+
+  function renderSwpTab() {
+    var c = S.swp;
+    var errs = validateSwp(c);
+    var html = renderSwpControls(c, errs);
+    if (Object.keys(errs).length) {
+      html += '<div class="empty">Fix the highlighted inputs above to see results.</div>';
+      return html;
+    }
+    var runs = {
+      pess: runSwp(c, Number(c.returns.pess)),
+      base: runSwp(c, Number(c.returns.base)),
+      opt: runSwp(c, Number(c.returns.opt))
+    };
+    html += renderSwpHeadline(c, runs);
+
+    var maxW = swpMaxSustainable(c, Number(c.returns.base));
+    html += '<div class="card"><h2>Sustainability</h2><div class="stat-grid">';
+    html += stat('Max sustainable / instalment', fmtINR(maxW), 'pos');
+    html += stat('You are drawing', fmtINR(Number(c.amount)), Number(c.amount) > maxW ? 'neg' : 'pos');
+    if (c.volatility.enabled) {
+      html += stat('Survival probability', swpMonteCarlo(c, 500).toFixed(0) + '%');
+      html += stat('Monte Carlo', '500 paths · σ ' + Number(c.volatility.stdev) + '%');
+    }
+    html += '</div><div class="hint">Largest ' + escapeHTML(swpFreq(c).l.toLowerCase()) + ' withdrawal (' +
+      (c.amountMode === 'net' ? 'net of TDS' : 'gross') + ') that still leaves the corpus intact at the horizon, at the base return.' +
+      (c.volatility.enabled ? ' Monte Carlo redraws the return every instalment, so it captures sequence-of-returns risk rather than just an average.' : '') + '</div></div>';
+
+    html += renderSwpDetail(c, runs);
+    return html;
+  }
+
+  function swpExportCsv() {
+    var c = S.swp;
+    if (Object.keys(validateSwp(c)).length) { toast('error', 'Fix the highlighted inputs first.'); return; }
+    var out = runSwp(c, Number(c.returns.base));
+    var head = ['Date', 'FinancialYear', 'NAV', 'Gross', 'Units', 'CostBasis', 'STGain', 'LTGain',
+      'ExemptionUsed', 'ExitLoad', 'TDS', 'Liability', 'NetCredit', 'RemainingUnits', 'RemainingValue'];
+    var lines = [head.join(',')].concat(out.ledger.map(function (r) {
+      return [r.date, finYearLabel(r.fy), r.nav.toFixed(4), r.gross.toFixed(2), r.units.toFixed(4),
+        r.cost.toFixed(2), r.stGain.toFixed(2), r.ltGain.toFixed(2), r.exemptionUsed.toFixed(2),
+        r.exitLoad.toFixed(2), r.tds.toFixed(2), r.liability.toFixed(2), r.net.toFixed(2),
+        r.remainingUnits.toFixed(4), r.remainingValue.toFixed(2)].join(',');
+    }));
+    var blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'swp-ledger.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    toast('success', 'Exported ' + out.ledger.length + ' instalments.');
+  }
+
   function renderHistoryTab() {
     if (S.scenarios.length === 0) return '<div class="empty">No saved scenarios yet.<br>Run a what-if and tap "Save Scenario" to keep it here.</div>';
     var html = '';
@@ -1073,12 +1808,13 @@
   var TABS = [
     { v: 'new', l: 'New', ic: '＋' },
     { v: 'top', l: 'Top 10', ic: '★' },
+    { v: 'swp', l: 'SWP', ic: '₹' },
     { v: 'history', l: 'History', ic: '☰' },
     { v: 'settings', l: 'Settings', ic: '⚙' }
   ];
 
   function renderHeader() {
-    var titles = { new: 'What-If', top: 'Top 10', history: 'History', settings: 'Settings' };
+    var titles = { new: 'What-If', top: 'Top 10', swp: 'SWP Planner', history: 'History', settings: 'Settings' };
     return '<header class="topbar"><div class="brand"><span class="dot"></span>Playground · ' + titles[S.tab] + '</div></header>';
   }
 
@@ -1091,12 +1827,33 @@
   function render() {
     var body = S.tab === 'new' ? renderNewTab()
       : S.tab === 'top' ? renderTopTab()
+      : S.tab === 'swp' ? renderSwpTab()
       : S.tab === 'history' ? renderHistoryTab()
       : renderSettingsTab();
+    // Re-rendering replaces innerHTML, which would drop focus mid-keystroke on the
+    // live-recalculating SWP inputs — so carry focus and caret across the swap.
+    var active = document.activeElement;
+    var focusKey = active && active.dataset ? active.dataset.bind : null;
+    var scrollTop = 0;
+    var prevMain = document.querySelector('#app main');
+    if (prevMain) scrollTop = prevMain.scrollTop;
+    var selStart = null, selEnd = null;
+    if (focusKey) { try { selStart = active.selectionStart; selEnd = active.selectionEnd; } catch (e) { /* number/date inputs disallow selection */ } }
+
     document.getElementById('app').innerHTML =
       renderHeader() +
       '<main class="scroll">' + body + '</main>' +
       renderBottomNav();
+
+    var newMain = document.querySelector('#app main');
+    if (newMain && scrollTop) newMain.scrollTop = scrollTop;
+    if (focusKey) {
+      var el = document.querySelector('[data-bind="' + focusKey + '"]');
+      if (el) {
+        el.focus();
+        if (selStart != null) { try { el.setSelectionRange(selStart, selEnd); } catch (e) { /* ditto */ } }
+      }
+    }
   }
 
   /* ---------------------------------------------------------------------
@@ -1119,6 +1876,14 @@
     else if (action === 'set-top-period') { S.top.period = el.dataset.value; saveTopPrefs(); render(); }
     else if (action === 'fetch-top') { fetchTopList(); }
     else if (action === 'use-ticker') { useTicker(el.dataset.ticker); }
+    else if (action === 'swp-toggle-section') { S.swp.openSections[el.dataset.key] = !S.swp.openSections[el.dataset.key]; saveSwp(); render(); }
+    else if (action === 'swp-entry-mode') { S.swp.entryMode = el.dataset.value; saveSwp(); render(); }
+    else if (action === 'swp-amount-mode') { S.swp.amountMode = el.dataset.value; saveSwp(); render(); }
+    else if (action === 'swp-residency') { S.swp.residency = el.dataset.value; saveSwp(); render(); }
+    else if (action === 'swp-add-lot') { S.swp.lots.push({ id: uid(), units: 1000, nav: 100, date: yearsAgoISO(1) }); saveSwp(); render(); }
+    else if (action === 'swp-remove-lot') { S.swp.lots.splice(Number(el.dataset.index), 1); saveSwp(); render(); }
+    else if (action === 'swp-toggle-ledger') { S.swp.ledgerExpanded = !S.swp.ledgerExpanded; saveSwp(); render(); }
+    else if (action === 'swp-export-csv') { swpExportCsv(); }
   }
 
   function onProviderChange(newProviderKey) {
@@ -1141,6 +1906,16 @@
 
     if (path === 'settings.provider') { onProviderChange(value); return; }
     if (path.indexOf('settings.') === 0) { setPath(S, path, value); saveSettings(); return; }
+    // SWP recalculates live on every input, per the spec. Raw strings are stored so
+    // partial entry ("", "1.") types naturally; the engine coerces at every use.
+    if (path.indexOf('swp.') === 0) {
+      setPath(S, path, el.type === 'checkbox' ? el.checked : el.value);
+      saveSwp();
+      // Date inputs are segmented — re-rendering per keystroke fights the picker,
+      // so those settle on 'change' instead.
+      if (!(el.type === 'date' && e.type === 'input')) render();
+      return;
+    }
     setPath(S.draft, path, value);
 
     var structural = path === 'assetType' || path === 'benchmark.enabled';
