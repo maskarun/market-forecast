@@ -246,7 +246,9 @@
     cache: 'stockplay.pricecache.v1',
     toplists: 'stockplay.toplists.v1',
     topprefs: 'stockplay.topprefs.v1',
-    swp: 'stockplay.swp.v1'
+    swp: 'stockplay.swp.v1',
+    analysis: 'stockplay.analysis.v1',
+    holdings: 'stockplay.holdings.v1'
   };
 
   /* ---------------------------------------------------------------------
@@ -330,6 +332,23 @@
     'returnPct is the total percentage return across the whole period, not annualized. Return exactly 10 items, best first.'
   ].join(' ');
 
+  /* The model is asked for what it can genuinely recall, and explicitly forbidden
+     from inventing the things a browser-only app cannot know: live order-book depth,
+     indicators that need exact daily closes, option contract histories, and future
+     earnings dates. Saying "not known" is a valid, wanted answer. */
+  var ANALYSIS_SYSTEM_PROMPT = [
+    'You are a securities research reference for an educational sandbox — not live market data, not financial advice.',
+    'Given a ticker, its market and its asset type, report what you genuinely know from training data.',
+    'Do NOT invent any of the following, and never include them even if they seem helpful: RSI, MACD or any indicator requiring exact daily closes; bid/ask or order-book depth; option contract price histories; a specific future earnings date. For the reporting schedule give only the months the company typically reports in.',
+    'Where you do not know something, use the string "Not known" (or omit the numeric field) rather than guessing. An honest gap is more useful here than a confident invention.',
+    'State in "asOf" what period your knowledge actually covers, and in "note" any material uncertainty.',
+    'For an individual company: fill profile, financials (most recent 3 fiscal years, newest first), earnings and valuation.',
+    'For an index fund, ETF or mutual fund: fill profile (mandate, what it tracks or holds, typical expense ratio) and leave financials empty, earnings fields "Not known", and valuation numbers omitted — per-share earnings and P/E do not apply.',
+    'revenue and netIncome are display strings with their own units (e.g. "₹9,74,864 Cr" or "$391.0B"). netMarginPct, pe and pb are plain numbers.',
+    'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
+    '{"asOf":"","note":"","profile":{"business":"","sector":"","moat":"","risks":[""]},"financials":[{"period":"","revenue":"","netIncome":"","netMarginPct":0}],"earnings":{"trend":"","beatMissPattern":"","typicalReportingMonths":""},"valuation":{"pe":0,"pb":0,"sectorContext":""}}'
+  ].join(' ');
+
   var TOP_CATS_SYSTEM_PROMPT = [
     'You are a market reference for an educational investing sandbox — not live market data and not financial advice.',
     'For each Indian mutual fund tax category listed below, name the five best-performing widely-recognized schemes in that category over the requested period, by approximate total return, from your training knowledge.',
@@ -388,9 +407,13 @@
     loading: false,
     activeResult: null,
     activeError: null,
-    top: { market: 'in', category: 'stocks', period: '1y' },
+    top: { market: 'in', category: 'stocks', period: '1y', detail: null },
     topLists: {},
     topLoading: false,
+    analysis: {},
+    holdings: {},
+    // Transient per-ticker fetch state for the detail panel; never persisted.
+    detailFetch: { loading: false, priceError: '', analysisError: '' },
     swp: defaultSwp(),
     // Transient: deliberately outside S.swp so it never persists via saveSwp().
     swpRateFetch: { loading: false, preview: null }
@@ -475,6 +498,10 @@
     if (S.topLists !== rawTop) saveTopLists();
     S.top = Object.assign({}, S.top, loadJSON(STORE.topprefs, {}));
     S.swp = mergeSwp(loadJSON(STORE.swp, null));
+    S.analysis = loadJSON(STORE.analysis, {});
+    S.holdings = loadJSON(STORE.holdings, {});
+    // `detail` is a transient sub-view, not a saved preference.
+    S.top.detail = null;
   }
   // Shallow-merge would drop defaults for any nested field added after a save,
   // so the known sub-objects are merged individually.
@@ -492,8 +519,13 @@
   function saveScenarios() { saveJSON(STORE.scenarios, S.scenarios); }
   function saveCache() { saveJSON(STORE.cache, S.priceCache); }
   function saveTopLists() { saveJSON(STORE.toplists, S.topLists); }
-  function saveTopPrefs() { saveJSON(STORE.topprefs, S.top); }
+  // `detail` is a transient sub-view, so only the three selectors are persisted.
+  function saveTopPrefs() {
+    saveJSON(STORE.topprefs, { market: S.top.market, category: S.top.category, period: S.top.period });
+  }
   function saveSwp() { saveJSON(STORE.swp, S.swp); }
+  function saveAnalysis() { saveJSON(STORE.analysis, S.analysis); }
+  function saveHoldings() { saveJSON(STORE.holdings, S.holdings); }
 
   /* ---------------------------------------------------------------------
    * Small utilities
@@ -930,6 +962,183 @@
     }).then(function () { S.topLoading = false; render(); });
   }
 
+  /* ---------------------------------------------------------------------
+   * Stock detail panel. Two sources, kept strictly separate: the model
+   * supplies qualitative recall (profile, financials, earnings, valuation),
+   * while every number in the stats block is computed here in JS from the
+   * price series. Nothing numeric is echoed from the model.
+   * ------------------------------------------------------------------- */
+  function cleanStr(v, max) {
+    var s = String(v == null ? '' : v).trim();
+    return s ? s.slice(0, max || 400) : '';
+  }
+  function boundedNum(v, lo, hi) {
+    var n = Number(v);
+    return Number.isFinite(n) && n >= lo && n <= hi ? n : null;
+  }
+  // Descriptive text, so this degrades to "not available" rather than rejecting
+  // the payload the way the tax-rate sanitiser does.
+  function sanitizeAnalysis(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    var p = raw.profile || {}, e = raw.earnings || {}, v = raw.valuation || {};
+    return {
+      asOf: cleanStr(raw.asOf, 160),
+      note: cleanStr(raw.note, 400),
+      profile: {
+        business: cleanStr(p.business, 900),
+        sector: cleanStr(p.sector, 120),
+        moat: cleanStr(p.moat, 600),
+        risks: (Array.isArray(p.risks) ? p.risks : []).slice(0, 6)
+          .map(function (r) { return cleanStr(r, 240); }).filter(Boolean)
+      },
+      financials: (Array.isArray(raw.financials) ? raw.financials : []).slice(0, 5)
+        .map(function (f) {
+          return {
+            period: cleanStr(f && f.period, 40),
+            revenue: cleanStr(f && f.revenue, 40),
+            netIncome: cleanStr(f && f.netIncome, 40),
+            netMarginPct: boundedNum(f && f.netMarginPct, -1000, 1000)
+          };
+        }).filter(function (f) { return f.period; }),
+      earnings: {
+        trend: cleanStr(e.trend, 500),
+        beatMissPattern: cleanStr(e.beatMissPattern, 500),
+        typicalReportingMonths: cleanStr(e.typicalReportingMonths, 160)
+      },
+      valuation: {
+        pe: boundedNum(v.pe, 0, 10000),
+        pb: boundedNum(v.pb, 0, 10000),
+        sectorContext: cleanStr(v.sectorContext, 500)
+      }
+    };
+  }
+
+  // Month-end dates spanning `years` back from today, oldest first.
+  function monthlyDates(years) {
+    var end = todayISO(), out = [];
+    for (var i = years * 12; i >= 0; i--) out.push(addMonths(end, -i));
+    return out;
+  }
+
+  /* Every figure below is derived from the price series, not asked of the model.
+     Monthly granularity is what the oracle can supply honestly, so the trend
+     measure is a 10-month average — the standard monthly proxy for the 200-day. */
+  function computePriceStats(series) {
+    var pts = series.filter(function (p) { return Number.isFinite(p.price) && p.price > 0; });
+    if (pts.length < 2) return null;
+    var last = pts[pts.length - 1], first = pts[0];
+    var at = function (monthsBack) {
+      var i = pts.length - 1 - monthsBack;
+      return i >= 0 ? pts[i] : null;
+    };
+    var retOver = function (monthsBack) {
+      var p = at(monthsBack);
+      return p ? (last.price / p.price - 1) * 100 : null;
+    };
+    var years = Math.max(1 / 12, (pts.length - 1) / 12);
+    var cagr = first.price > 0 ? (Math.pow(last.price / first.price, 1 / years) - 1) * 100 : null;
+
+    var peak = -Infinity, maxDD = 0;
+    pts.forEach(function (p) {
+      if (p.price > peak) peak = p.price;
+      var dd = (p.price / peak - 1) * 100;
+      if (dd < maxDD) maxDD = dd;
+    });
+
+    var rets = [];
+    for (var i = 1; i < pts.length; i++) rets.push(Math.log(pts[i].price / pts[i - 1].price));
+    var mean = rets.reduce(function (a, b) { return a + b; }, 0) / (rets.length || 1);
+    var variance = rets.length > 1
+      ? rets.reduce(function (a, r) { return a + (r - mean) * (r - mean); }, 0) / (rets.length - 1) : 0;
+    var vol = Math.sqrt(variance) * Math.sqrt(12) * 100;
+
+    var window = pts.slice(-10);
+    var sma10 = window.reduce(function (a, p) { return a + p.price; }, 0) / window.length;
+
+    return {
+      points: pts, last: last, spanMonths: pts.length - 1,
+      ret6m: retOver(6), ret1y: retOver(12), ret5y: retOver(60),
+      cagr: cagr, maxDrawdown: maxDD, volatility: vol,
+      sma10: sma10, vsSma10: (last.price / sma10 - 1) * 100, smaMonths: window.length
+    };
+  }
+
+  /* ---- Tax-lot block: exact arithmetic on lots the user enters, since this
+     data lives in a brokerage account and cannot be fetched here. ---- */
+  function holdingFor(ticker) {
+    var h = S.holdings[ticker];
+    return {
+      lots: (h && Array.isArray(h.lots) ? h.lots : []),
+      priceOverride: h && h.priceOverride != null ? h.priceOverride : ''
+    };
+  }
+  function holdingPrice(ticker, stats) {
+    var h = holdingFor(ticker);
+    var manual = Number(h.priceOverride);
+    if (Number.isFinite(manual) && manual > 0) return manual;
+    return stats && stats.last ? stats.last.price : null;
+  }
+
+  // Equities use the equity holding threshold from the SWP rate panel.
+  var EQUITY_TAX_CAT = { tax: 'equity', hold: 'eq' };
+
+  function analyseLots(ticker, stats, market) {
+    var h = holdingFor(ticker);
+    var price = holdingPrice(ticker, stats);
+    var rates = S.swp.rates;
+    var today = todayISO();
+    var indian = market === 'in';
+    var lots = h.lots.map(function (l) {
+      var units = Number(l.units) || 0, cost = Number(l.price) || 0;
+      var basis = units * cost;
+      var value = price != null ? units * price : null;
+      var gain = value == null ? null : value - basis;
+      var months = l.date ? monthsBetween(l.date, today) : 0;
+      var lt = isLongTerm(EQUITY_TAX_CAT, months, rates);
+      var threshold = Number(rates.eqHoldMonths) || 12;
+      return {
+        id: l.id, units: units, cost: cost, date: l.date, basis: basis, value: value,
+        gain: gain, months: months, lt: lt,
+        ltOn: l.date ? addMonths(l.date, threshold) : ''
+      };
+    }).filter(function (l) { return l.units > 0 && l.date; });
+
+    if (!lots.length) return { lots: [], price: price, indian: indian };
+
+    var totals = lots.reduce(function (a, l) {
+      a.units += l.units; a.basis += l.basis;
+      a.value += l.value || 0; a.gain += l.gain || 0;
+      if (l.gain > 0) { if (l.lt) a.ltGain += l.gain; else a.stGain += l.gain; }
+      return a;
+    }, { units: 0, basis: 0, value: 0, gain: 0, stGain: 0, ltGain: 0 });
+
+    var tax = null, taxIfWaited = null, shortLots = lots.filter(function (l) { return !l.lt && l.gain > 0; });
+    if (indian && price != null) {
+      tax = estimateEquityTax(totals.stGain, totals.ltGain, rates);
+      // Same gains, but with the short-term lots reclassified as long-term.
+      taxIfWaited = estimateEquityTax(0, totals.stGain + totals.ltGain, rates);
+    }
+    var crossing = shortLots.slice().sort(function (a, b) { return a.ltOn < b.ltOn ? -1 : 1; })[0];
+    return {
+      lots: lots, totals: totals, price: price, indian: indian, tax: tax,
+      taxIfWaited: taxIfWaited,
+      saving: tax != null && taxIfWaited != null ? tax - taxIfWaited : null,
+      nextCrossing: crossing || null
+    };
+  }
+
+  // Mirrors the SWP engine's treatment: exemption on long-term gains, then
+  // surcharge on the aggregate and cess on top.
+  function estimateEquityTax(stGain, ltGain, rates) {
+    var exemption = Number(rates.ltcgExemption) || 0;
+    var taxableLt = Math.max(0, ltGain - Math.min(exemption, ltGain));
+    var taxableSt = Math.max(0, stGain);
+    var base = taxableSt * baseRateFor(EQUITY_TAX_CAT, false, rates) / 100
+      + taxableLt * baseRateFor(EQUITY_TAX_CAT, true, rates) / 100;
+    var sur = surchargePct(rates.surcharge, taxableSt + taxableLt);
+    return base * (1 + sur / 100) * (1 + (Number(rates.cess) || 0) / 100);
+  }
+
   function useSwpCategory(cat) {
     S.swp.category = cat;
     S.swpRateFetch.preview = null;
@@ -941,6 +1150,57 @@
 
   // Only ever invoked from a Top-tab row, so the selected market determines the
   // currency label the What-If form should carry over.
+  function openAnalysis(ticker, name) {
+    S.top.detail = { ticker: ticker, name: name || '' };
+    S.detailFetch = { loading: false, priceError: '', analysisError: '' };
+    render();
+    if (!S.analysis[ticker]) fetchAnalysis(ticker);
+    else render();
+  }
+  function closeAnalysis() { S.top.detail = null; render(); }
+
+  // Both calls fire together: qualitative analysis, and the price series the
+  // stats are computed from. One failing does not block the other.
+  function fetchAnalysis(ticker) {
+    var d = S.top.detail;
+    if (!d) return;
+    S.detailFetch = { loading: true, priceError: '', analysisError: '' };
+    render();
+    var assetType = S.top.category === 'stocks' ? 'individual listed company'
+      : S.top.category === 'index' ? 'index fund or ETF' : 'mutual fund';
+    var market = topOption(TOP_MARKETS, S.top.market);
+    var dates = monthlyDates(5);
+
+    var analysisCall = llmChatRequest(ANALYSIS_SYSTEM_PROMPT, JSON.stringify({
+      ticker: ticker, name: d.name, market: market.prompt, assetType: assetType
+    })).then(function (content) {
+      var clean = sanitizeAnalysis(extractJSON(content));
+      if (!clean) throw new Error('Could not parse the analysis from the model response.');
+      S.analysis[ticker] = Object.assign({
+        fetchedAt: new Date().toISOString(), model: currentModelLabel()
+      }, clean);
+      saveAnalysis();
+    }).catch(function (err) { S.detailFetch.analysisError = err.message || 'Analysis failed.'; });
+
+    var priceCall = fetchPrices(ticker, dates)
+      .catch(function (err) { S.detailFetch.priceError = err.message || 'Price lookup failed.'; });
+
+    Promise.all([analysisCall, priceCall]).then(function () {
+      S.detailFetch.loading = false;
+      render();
+      if (S.detailFetch.analysisError && S.detailFetch.priceError) toast('error', 'Could not load this stock.');
+    });
+  }
+
+  // Reads whatever the shared price cache already has; no network here.
+  function detailPriceStats(ticker) {
+    var series = monthlyDates(5).map(function (dt) {
+      var key = cacheKey(ticker, dt);
+      return { date: dt, price: key in S.priceCache ? S.priceCache[key] : null };
+    });
+    return computePriceStats(series);
+  }
+
   function useTicker(ticker) {
     S.draft.ticker = ticker;
     S.draft.currency = topOption(TOP_MARKETS, S.top.market).currency;
@@ -1583,8 +1843,181 @@
     return html;
   }
 
+  function pctStat(label, v) {
+    return stat(label, Number.isFinite(v) ? fmtPercent(v) : '—', Number.isFinite(v) ? (v >= 0 ? 'pos' : 'neg') : '');
+  }
+
+  function renderDetailStats(stats, cur) {
+    if (!stats) {
+      return '<div class="hint">No price data yet for the computed stats.' +
+        (S.detailFetch.priceError ? ' ' + escapeHTML(S.detailFetch.priceError) : '') + '</div>';
+    }
+    var html = '<div class="stat-grid">';
+    html += pctStat('6-month return', stats.ret6m);
+    html += pctStat('1-year return', stats.ret1y);
+    html += pctStat('5-year return', stats.ret5y);
+    html += pctStat('CAGR', stats.cagr);
+    html += pctStat('Max drawdown', stats.maxDrawdown);
+    html += stat('Volatility (ann.)', Number.isFinite(stats.volatility) ? stats.volatility.toFixed(1) + '%' : '—');
+    html += stat('Last close', fmtCurrency(stats.last.price, cur));
+    html += stat('vs ' + stats.smaMonths + '-month avg', fmtPercent(stats.vsSma10), stats.vsSma10 >= 0 ? 'pos' : 'neg');
+    html += '</div>';
+    html += '<div class="hint">Computed here in JavaScript from ' + stats.points.length +
+      ' estimated month-end prices — not exchange data. The ' + stats.smaMonths +
+      '-month average is the monthly stand-in for a 200-day average; this granularity does not support RSI or MACD honestly.</div>';
+    return html;
+  }
+
+  function renderLotBlock(ticker, stats, market, cur) {
+    var h = holdingFor(ticker);
+    var a = analyseLots(ticker, stats, market);
+    var html = '<div class="card"><h2>Your position</h2>';
+    html += '<div class="hint">Holdings and tax lots live in your brokerage, not anywhere this app can reach — so enter them here and the maths below is exact rather than recalled.</div>';
+
+    html += (h.lots || []).map(function (l, i) {
+      return '<div class="lot-row">' +
+        '<div class="field"><label>Units</label><input ' + swpNumAttrs() + ' data-bind="holdings.' + ticker + '.lots.' + i + '.units" value="' + escapeHTML(String(l.units == null ? '' : l.units)) + '"></div>' +
+        '<div class="field"><label>Buy price</label><input ' + swpNumAttrs() + ' data-bind="holdings.' + ticker + '.lots.' + i + '.price" value="' + escapeHTML(String(l.price == null ? '' : l.price)) + '"></div>' +
+        '<div class="field"><label>Bought</label><input type="date" max="' + todayISO() + '" data-bind="holdings.' + ticker + '.lots.' + i + '.date" value="' + escapeHTML(l.date || '') + '"></div>' +
+        '<button class="lot-del" data-action="remove-holding-lot" data-ticker="' + escapeHTML(ticker) + '" data-index="' + i + '" title="Remove lot">✕</button>' +
+        '</div>';
+    }).join('');
+    html += '<div class="btn-row"><button class="secondary" data-action="add-holding-lot" data-ticker="' + escapeHTML(ticker) + '">+ Add lot</button></div>';
+
+    if (!a.lots.length) {
+      html += '<div class="hint">Add a lot with units, buy price and date to see cost basis, holding period and tax treatment.</div></div>';
+      return html;
+    }
+
+    html += '<div class="divider"></div>';
+    html += '<div class="field"><label>Current price ' + (a.price != null && !h.priceOverride ? '(from the price lookup — override if you have a live quote)' : '') + '</label>' +
+      '<input ' + swpNumAttrs() + ' data-bind="holdings.' + ticker + '.priceOverride" value="' + escapeHTML(String(h.priceOverride)) + '" placeholder="' + (a.price != null ? String(a.price.toFixed(2)) : 'enter a price') + '"></div>';
+
+    if (a.price == null) {
+      html += '<div class="hint stale">Enter a current price to value the position — no price is cached for this ticker yet.</div></div>';
+      return html;
+    }
+
+    html += '<div class="tbl-wrap" style="margin-top:10px"><table class="tbl"><thead><tr>' +
+      '<th>Bought</th><th>Units</th><th>Cost</th><th>Basis</th><th>Value</th><th>Unrealised</th><th>Held</th><th>Term</th></tr></thead><tbody>';
+    html += a.lots.map(function (l) {
+      return '<tr><td>' + escapeHTML(fmtDate(l.date)) + '</td><td>' + l.units + '</td><td>' + fmtCurrency(l.cost, cur) +
+        '</td><td>' + fmtCurrency(l.basis, cur) + '</td><td>' + fmtCurrency(l.value, cur) +
+        '</td><td class="' + (l.gain >= 0 ? 'pos' : 'neg') + '">' + fmtCurrency(l.gain, cur) +
+        '</td><td>' + l.months + 'mo</td><td class="' + (l.lt ? 'pos' : '') + '">' + (l.lt ? 'Long' : 'Short') + '</td></tr>';
+    }).join('');
+    html += '</tbody></table></div>';
+
+    html += '<div class="stat-grid" style="margin-top:12px">';
+    html += stat('Cost basis', fmtCurrency(a.totals.basis, cur));
+    html += stat('Market value', fmtCurrency(a.totals.value, cur));
+    html += stat('Unrealised P&L', fmtCurrency(a.totals.gain, cur), a.totals.gain >= 0 ? 'pos' : 'neg');
+    html += stat('Return', fmtPercent(a.totals.basis > 0 ? a.totals.gain / a.totals.basis * 100 : 0), a.totals.gain >= 0 ? 'pos' : 'neg');
+    html += '</div>';
+
+    if (a.indian && a.tax != null) {
+      html += '<div class="divider"></div><div class="section-label">If you sold everything today</div>';
+      html += '<div class="stat-grid">';
+      html += stat('Short-term gain', fmtCurrency(a.totals.stGain, cur), a.totals.stGain > 0 ? 'neg' : '');
+      html += stat('Long-term gain', fmtCurrency(a.totals.ltGain, cur), 'pos');
+      html += stat('Estimated tax', fmtCurrency(a.tax, cur), a.tax > 0 ? 'neg' : '');
+      html += stat('Net after tax', fmtCurrency(a.totals.value - a.tax, cur), 'pos');
+      html += '</div>';
+      if (a.nextCrossing && a.saving > 0.5) {
+        html += '<div class="hint stale">Lot bought ' + escapeHTML(fmtDate(a.nextCrossing.date)) + ' turns long-term on <strong>' +
+          escapeHTML(fmtDate(a.nextCrossing.ltOn)) + '</strong>. Selling after every lot has crossed would cost about ' +
+          fmtCurrency(a.taxIfWaited, cur) + ' instead of ' + fmtCurrency(a.tax, cur) + ' — a difference of about <strong>' +
+          fmtCurrency(a.saving, cur) + '</strong>, before any price movement in the meantime.</div>';
+      }
+      html += '<div class="hint">Uses the editable rate panel on the SWP tab, including the annual long-term exemption. Those rates are placeholders unless you have verified them.</div>';
+    } else if (!a.indian) {
+      html += '<div class="hint">Holding periods and unrealised P&L only — the tax engine here encodes Indian rules, and no rate table is configured for this market.</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderDetailTab() {
+    var d = S.top.detail, t = S.top;
+    var ticker = d.ticker;
+    var cur = topOption(TOP_MARKETS, t.market).currency;
+    var a = S.analysis[ticker];
+    var stats = detailPriceStats(ticker);
+    var isFund = t.category !== 'stocks';
+
+    var html = '<div class="card">';
+    html += '<div style="display:flex;align-items:center;gap:10px;justify-content:space-between">';
+    html += '<div style="min-width:0"><div class="rank-ticker" style="font-size:19px">' + escapeHTML(ticker) + '</div>' +
+      (d.name ? '<div class="rank-name">' + escapeHTML(d.name) + '</div>' : '') + '</div>';
+    html += '<button class="hbtn" data-action="close-analysis">← Back</button></div>';
+    html += '<div class="btn-row"><button class="secondary" data-action="analysis-what-if" data-ticker="' + escapeHTML(ticker) + '">Run What-If</button>' +
+      '<button class="secondary" data-action="refresh-analysis" data-ticker="' + escapeHTML(ticker) + '"' + (S.detailFetch.loading ? ' disabled' : '') + '>' +
+      (S.detailFetch.loading ? '<span class="spinner"></span>Loading…' : 'Refresh') + '</button></div>';
+    html += '</div>';
+
+    html += '<div class="card"><h2>Price behaviour</h2>' + renderDetailStats(stats, cur) + '</div>';
+
+    if (a) {
+      if (a.profile.business || a.profile.sector) {
+        html += '<div class="card"><h2>Profile</h2>';
+        if (a.profile.sector) html += '<div class="hint"><strong>' + escapeHTML(a.profile.sector) + '</strong></div>';
+        if (a.profile.business) html += '<div class="hint">' + escapeHTML(a.profile.business) + '</div>';
+        if (a.profile.moat) { html += '<div class="section-label" style="margin-top:12px">Competitive position</div><div class="hint">' + escapeHTML(a.profile.moat) + '</div>'; }
+        if (a.profile.risks.length) {
+          html += '<div class="section-label" style="margin-top:12px">Key risks</div>';
+          html += '<div class="hint">' + a.profile.risks.map(function (r) { return '• ' + escapeHTML(r); }).join('<br>') + '</div>';
+        }
+        html += '</div>';
+      }
+      if (a.financials.length) {
+        html += '<div class="card"><h2>Financials</h2><div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+          '<th>Period</th><th>Revenue</th><th>Net income</th><th>Net margin</th></tr></thead><tbody>';
+        html += a.financials.map(function (f) {
+          return '<tr><td>' + escapeHTML(f.period) + '</td><td>' + escapeHTML(f.revenue || '—') + '</td><td>' +
+            escapeHTML(f.netIncome || '—') + '</td><td class="' + (f.netMarginPct > 0 ? 'pos' : '') + '">' +
+            (f.netMarginPct == null ? '—' : f.netMarginPct.toFixed(1) + '%') + '</td></tr>';
+        }).join('');
+        html += '</tbody></table></div></div>';
+      }
+      if (!isFund && (a.earnings.trend || a.earnings.beatMissPattern || a.earnings.typicalReportingMonths)) {
+        html += '<div class="card"><h2>Earnings</h2>';
+        if (a.earnings.trend) html += '<div class="hint">' + escapeHTML(a.earnings.trend) + '</div>';
+        if (a.earnings.beatMissPattern) html += '<div class="hint" style="margin-top:8px">' + escapeHTML(a.earnings.beatMissPattern) + '</div>';
+        if (a.earnings.typicalReportingMonths) html += '<div class="hint" style="margin-top:8px">Typically reports: ' + escapeHTML(a.earnings.typicalReportingMonths) + '. No confirmed next date — a model cannot know a future announcement.</div>';
+        html += '</div>';
+      }
+      if (!isFund && (a.valuation.pe != null || a.valuation.pb != null || a.valuation.sectorContext)) {
+        html += '<div class="card"><h2>Valuation</h2><div class="stat-grid">';
+        html += stat('P/E', a.valuation.pe == null ? '—' : a.valuation.pe.toFixed(1));
+        html += stat('P/B', a.valuation.pb == null ? '—' : a.valuation.pb.toFixed(1));
+        html += '</div>';
+        if (a.valuation.sectorContext) html += '<div class="hint">' + escapeHTML(a.valuation.sectorContext) + '</div>';
+        html += '</div>';
+      }
+      html += '<div class="card"><div class="hint stale">⚠ Profile, financials, earnings and valuation are the model\'s training recall, not a data feed. ' +
+        escapeHTML(a.model || 'The model') + ' states this covers: <strong>' + escapeHTML(a.asOf || 'period not stated') + '</strong>' +
+        (a.note ? ' — ' + escapeHTML(a.note) : '') + '. Fetched ' + escapeHTML(new Date(a.fetchedAt).toLocaleString()) + '.</div></div>';
+    } else if (S.detailFetch.analysisError) {
+      html += '<div class="card"><h2>Analysis</h2><div class="err">' + escapeHTML(S.detailFetch.analysisError) + '</div></div>';
+    } else if (S.detailFetch.loading) {
+      html += '<div class="card"><div class="hint"><span class="spinner"></span>Fetching company analysis…</div></div>';
+    }
+
+    html += renderLotBlock(ticker, stats, t.market, cur);
+
+    html += '<div class="card"><h2>Not shown, on purpose</h2><div class="hint">' +
+      'This page leaves out <strong>Level II order book depth</strong> (needs a live exchange feed), ' +
+      '<strong>RSI and MACD</strong> (need exact daily closes; on estimated monthly prices they would look precise and mean nothing), ' +
+      '<strong>options price history</strong> (too sparse in training data to recall), and ' +
+      '<strong>confirmed upcoming earnings dates</strong> (a future date cannot be in training data). ' +
+      'Each of those would have to be invented to appear here, so they are absent by choice rather than oversight.</div></div>';
+
+    return html;
+  }
+
   function renderTopTab() {
     var t = S.top;
+    if (t.detail) return renderDetailTab();
     var entry = S.topLists[topKey(t.market, t.category, t.period)];
     var html = '';
 
@@ -1616,9 +2049,10 @@
       html += '<h2>Top 10 · ' + escapeHTML(topOption(TOP_MARKETS, t.market).l) + ' · ' +
         escapeHTML(topOption(TOP_CATEGORIES, t.category).l) + ' · ' + topOption(TOP_PERIODS, t.period).label + '</h2>';
       html += entry.items.map(function (it, i) {
-        return rankRow(it, i, 'data-action="use-ticker" data-ticker="' + escapeHTML(it.ticker) + '"');
+        return rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
+          '" data-name="' + escapeHTML(it.name || '') + '"');
       }).join('');
-      html += '<div class="hint">Tap any row to load that ticker into the What-If tab. Fetched ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
+      html += '<div class="hint">Tap any row for a detailed analysis. Fetched ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
       html += '</div>';
     } else if (!S.topLoading) {
       html += '<div class="empty">No list loaded yet.<br>Pick a market, category and period, then tap "' +
@@ -2152,6 +2586,20 @@
     else if (action === 'fetch-top') { fetchTopList(); }
     else if (action === 'use-ticker') { useTicker(el.dataset.ticker); }
     else if (action === 'use-swp-category') { useSwpCategory(el.dataset.category); }
+    else if (action === 'open-analysis') { openAnalysis(el.dataset.ticker, el.dataset.name); }
+    else if (action === 'close-analysis') { closeAnalysis(); }
+    else if (action === 'refresh-analysis') { fetchAnalysis(el.dataset.ticker); }
+    else if (action === 'analysis-what-if') { useTicker(el.dataset.ticker); }
+    else if (action === 'add-holding-lot') {
+      var tk = el.dataset.ticker;
+      if (!S.holdings[tk]) S.holdings[tk] = { lots: [], priceOverride: '' };
+      S.holdings[tk].lots.push({ id: uid(), units: '', price: '', date: todayISO() });
+      saveHoldings(); render();
+    }
+    else if (action === 'remove-holding-lot') {
+      var rt = el.dataset.ticker;
+      if (S.holdings[rt]) { S.holdings[rt].lots.splice(Number(el.dataset.index), 1); saveHoldings(); render(); }
+    }
     else if (action === 'swp-toggle-section') { S.swp.openSections[el.dataset.key] = !S.swp.openSections[el.dataset.key]; saveSwp(); render(); }
     else if (action === 'swp-entry-mode') { S.swp.entryMode = el.dataset.value; saveSwp(); render(); }
     else if (action === 'swp-amount-mode') { S.swp.amountMode = el.dataset.value; saveSwp(); render(); }
@@ -2188,6 +2636,14 @@
     if (path.indexOf('settings.') === 0) { setPath(S, path, value); saveSettings(); return; }
     // SWP recalculates live on every input, per the spec. Raw strings are stored so
     // partial entry ("", "1.") types naturally; the engine coerces at every use.
+    // Holdings recalculate live like the SWP inputs, and store raw strings for the
+    // same reason — partial entry has to type naturally.
+    if (path.indexOf('holdings.') === 0) {
+      setPath(S, path, el.type === 'checkbox' ? el.checked : el.value);
+      saveHoldings();
+      if (!(el.type === 'date' && e.type === 'input')) render();
+      return;
+    }
     if (path.indexOf('swp.') === 0) {
       setPath(S, path, el.type === 'checkbox' ? el.checked : el.value);
       saveSwp();
