@@ -191,6 +191,8 @@
   .lot-row { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 8px; }
   .lot-row .field { flex: 1; margin-bottom: 0; }
   .lot-del { flex: 0 0 auto; background: var(--surface-2); border: 1px solid var(--border); color: var(--red); border-radius: var(--radius-sm); padding: 10px 11px; font-size: 13px; cursor: pointer; }
+  .preview-box { background: var(--surface-2); border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: 12px; margin: 12px 0; }
+  .preview-box h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--accent-2); }
 
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
@@ -328,6 +330,20 @@
     'returnPct is the total percentage return across the whole period, not annualized. Return exactly 10 items, best first.'
   ].join(' ');
 
+  /* A model cannot look anything up — it recalls from training data with a cutoff,
+     the same staleness the built-in placeholders warn about. So it is asked to
+     declare which Finance Act it thinks it is describing and how sure it is, and
+     that provenance is kept with the numbers rather than dropped. */
+  var RATES_SYSTEM_PROMPT = [
+    'You are a reference for Indian capital-gains taxation of mutual fund redemptions by a non-resident individual (NRI).',
+    'Report the rates you believe are currently in force, drawn from your training knowledge.',
+    'You cannot browse the internet. State plainly which Finance Act or Budget year your figures come from, and flag your own uncertainty honestly rather than projecting false confidence.',
+    'eqStcg and eqLtcg are the section 111A and 112A rates on equity-oriented funds. ltcgExemption is the annual section 112A exemption in rupees. debtSlab is the rate applied to debt-fund gains. cess is the health and education cess percentage. Holding periods are in months. surcharge is the NRI surcharge slab table on capital gains, ordered ascending by threshold, thresholds in rupees.',
+    'Every value inside "rates" must be a plain number — no ranges, no text, no nulls.',
+    'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
+    '{"basis":"<Finance Act / Budget year these figures are from>","note":"<one sentence on staleness or uncertainty>","rates":{"eqStcg":0,"eqLtcg":0,"ltcgExemption":0,"debtSlab":0,"cess":0,"eqHoldMonths":0,"otherHoldMonths":0,"surcharge":[{"over":0,"pct":0}]}}'
+  ].join(' ');
+
   /* ---------------------------------------------------------------------
    * State singleton
    * ------------------------------------------------------------------- */
@@ -364,7 +380,9 @@
     top: { market: 'in', category: 'stocks', period: '1y' },
     topLists: {},
     topLoading: false,
-    swp: defaultSwp()
+    swp: defaultSwp(),
+    // Transient: deliberately outside S.swp so it never persists via saveSwp().
+    swpRateFetch: { loading: false, preview: null }
   };
 
   function defaultSwp() {
@@ -387,6 +405,7 @@
       transitionEnabled: false,
       transitionDate: '',
       rates: defaultRates(),
+      ratesMeta: { source: 'default', fetchedAt: '', basis: '', note: '', model: '' },
       sec197: { enabled: false, rate: 0 },
       dtaa: { enabled: false, rate: 0 },
       exitLoad: { pct: 1, days: 365 },
@@ -452,7 +471,7 @@
     var d = defaultSwp();
     if (!saved || typeof saved !== 'object') return d;
     var out = Object.assign({}, d, saved);
-    ['returns', 'volatility', 'rates', 'sec197', 'dtaa', 'exitLoad', 'lump', 'openSections'].forEach(function (k) {
+    ['returns', 'volatility', 'rates', 'ratesMeta', 'sec197', 'dtaa', 'exitLoad', 'lump', 'openSections'].forEach(function (k) {
       out[k] = Object.assign({}, d[k], saved[k] || {});
     });
     if (!Array.isArray(out.lots) || !out.lots.length) out.lots = d.lots;
@@ -1128,6 +1147,108 @@
     });
   }
 
+  /* ---------------------------------------------------------------------
+   * Model-suggested tax rates. The model is a fallible recall source, not an
+   * authority, so: bounds-check everything, never write straight into the
+   * panel, and keep the provenance attached to whatever gets applied.
+   * ------------------------------------------------------------------- */
+  var RATE_BOUNDS = {
+    eqStcg: [0, 100], eqLtcg: [0, 100], debtSlab: [0, 100], cess: [0, 100],
+    ltcgExemption: [0, 1e8], eqHoldMonths: [1, 120], otherHoldMonths: [1, 120]
+  };
+  var RATE_LABELS = {
+    eqStcg: 'Equity STCG %', eqLtcg: 'Equity LTCG %', ltcgExemption: 'LTCG annual exemption',
+    debtSlab: 'Debt / slab %', cess: 'Cess %', eqHoldMonths: 'Equity holding (months)',
+    otherHoldMonths: 'Other-asset holding (months)', surcharge: 'NRI surcharge slabs'
+  };
+
+  // Returns null if any scalar is missing or out of range — one bad field rejects the
+  // whole response rather than letting e.g. eqLtcg:1250 quietly wreck every figure.
+  function sanitizeRates(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    var out = {}, ok = true;
+    Object.keys(RATE_BOUNDS).forEach(function (k) {
+      var v = Number(raw[k]);
+      if (!Number.isFinite(v) || v < RATE_BOUNDS[k][0] || v > RATE_BOUNDS[k][1]) ok = false;
+      else out[k] = v;
+    });
+    if (!ok) return null;
+    out.surcharge = (Array.isArray(raw.surcharge) ? raw.surcharge : [])
+      .map(function (s) { return { over: Number(s && s.over), pct: Number(s && s.pct) }; })
+      .filter(function (s) {
+        return Number.isFinite(s.over) && s.over >= 0 && Number.isFinite(s.pct) && s.pct >= 0 && s.pct <= 100;
+      })
+      .sort(function (a, b) { return a.over - b.over; });
+    return out;
+  }
+
+  function surchargeSummary(slabs) {
+    if (!slabs || !slabs.length) return 'none';
+    return slabs.map(function (s) { return s.pct + '% over ' + fmtINR(s.over); }).join(', ');
+  }
+  function rateDisplay(key, value) {
+    if (key === 'surcharge') return surchargeSummary(value);
+    if (key === 'ltcgExemption') return fmtINR(value);
+    return String(value);
+  }
+  function rateDiff(current, next) {
+    return Object.keys(RATE_LABELS).filter(function (k) {
+      return rateDisplay(k, current[k]) !== rateDisplay(k, next[k]);
+    }).map(function (k) {
+      return { key: k, label: RATE_LABELS[k], from: rateDisplay(k, current[k]), to: rateDisplay(k, next[k]) };
+    });
+  }
+
+  function currentModelLabel() {
+    var p = providerOf(S.settings.provider);
+    var m = p.style === 'gemini'
+      ? (String(S.settings.url || '').match(/models\/([^:]+)/) || [])[1]
+      : extractModelFromUrl(S.settings.url || '').model;
+    return p.label + (m ? ' · ' + m : '');
+  }
+
+  function fetchSwpRates() {
+    S.swpRateFetch.loading = true; render();
+    llmChatRequest(RATES_SYSTEM_PROMPT, JSON.stringify({
+      jurisdiction: 'India', taxpayer: 'non-resident individual (NRI)', asset: 'mutual fund units'
+    })).then(function (content) {
+      var parsed = extractJSON(content);
+      if (!parsed) throw new Error('Could not parse a rate table from the model response.');
+      var clean = sanitizeRates(parsed.rates);
+      if (!clean) throw new Error('The model returned rates that failed a sanity check (a value was missing or out of range), so nothing was changed.');
+      S.swpRateFetch.preview = {
+        rates: clean,
+        basis: String(parsed.basis == null ? '' : parsed.basis).slice(0, 200),
+        note: String(parsed.note == null ? '' : parsed.note).slice(0, 300),
+        model: currentModelLabel()
+      };
+      toast('success', 'Rates received — review the changes before applying.');
+    }).catch(function (err) {
+      toast('error', err.message || 'Could not get rates from the model.');
+    }).then(function () { S.swpRateFetch.loading = false; render(); });
+  }
+
+  function applySwpRates() {
+    var p = S.swpRateFetch.preview;
+    if (!p) return;
+    S.swp.rates = Object.assign({}, S.swp.rates, p.rates);
+    S.swp.ratesMeta = {
+      source: 'model', fetchedAt: new Date().toISOString(),
+      basis: p.basis, note: p.note, model: p.model
+    };
+    S.swpRateFetch.preview = null;
+    saveSwp(); render();
+    toast('success', 'Applied. Still worth checking against the current Finance Act.');
+  }
+  function discardSwpRates() { S.swpRateFetch.preview = null; render(); }
+  function resetSwpRates() {
+    S.swp.rates = defaultRates();
+    S.swp.ratesMeta = { source: 'default', fetchedAt: '', basis: '', note: '', model: '' };
+    S.swpRateFetch.preview = null;
+    saveSwp(); render();
+    toast('success', 'Reset to built-in defaults.');
+  }
+
   function validateSwp(cfg) {
     var errs = {};
     if (cfg.entryMode === 'lump') {
@@ -1445,6 +1566,53 @@
     }).join('') + '</div>';
   }
 
+  // The warning never goes away — a model answer is still recall, not verified law.
+  // It only changes wording to name who said what, and on what claimed basis.
+  function renderRateProvenance(c) {
+    var m = c.ratesMeta || {};
+    var hasKey = !!(S.settings.url && S.settings.apiKey);
+    var html = '';
+    if (m.source === 'model') {
+      html += '<div class="hint stale">⚠ Model-supplied from training data, not verified law. ' +
+        escapeHTML(m.model || 'A model') + ' reported these as: <strong>' + escapeHTML(m.basis || 'basis not stated') + '</strong>' +
+        (m.fetchedAt ? ', asked ' + escapeHTML(new Date(m.fetchedAt).toLocaleDateString()) : '') + '. ' +
+        (m.note ? escapeHTML(m.note) + ' ' : '') +
+        'A model cannot look up current law — check these against the current Finance Act before trusting any number below.</div>';
+    } else {
+      html += '<div class="hint stale">⚠ These are placeholders from training knowledge, not verified current law. Indian rates move at almost every Budget — check equity STCG/LTCG, the LTCG exemption, NRI surcharge thresholds, cess and holding periods against the current Finance Act before trusting any number below.</div>';
+    }
+    html += '<div class="btn-row">';
+    html += '<button class="secondary" data-action="swp-fetch-rates"' + (S.swpRateFetch.loading || !hasKey ? ' disabled' : '') + '>' +
+      (S.swpRateFetch.loading ? '<span class="spinner"></span>Asking…' : 'Ask the model for rates') + '</button>';
+    if (m.source === 'model') html += '<button class="secondary danger" data-action="swp-reset-rates">Reset to defaults</button>';
+    html += '</div>';
+    if (!hasKey) html += '<div class="hint">Add a provider and API key in Settings to enable this. Everything else in this tab works offline.</div>';
+    return html;
+  }
+
+  function renderRatePreview(c) {
+    var p = S.swpRateFetch.preview;
+    if (!p) return '';
+    var diff = rateDiff(c.rates, p.rates);
+    var html = '<div class="preview-box"><h3>Suggested rates — not applied yet</h3>';
+    html += '<div class="hint">' + escapeHTML(p.model || 'The model') + ' says these come from: <strong>' +
+      escapeHTML(p.basis || 'basis not stated') + '</strong>' + (p.note ? ' — ' + escapeHTML(p.note) : '') + '</div>';
+    if (!diff.length) {
+      html += '<div class="hint">Nothing differs from what you already have.</div>';
+      html += '<div class="btn-row"><button class="secondary" data-action="swp-discard-rates">Close</button></div>';
+    } else {
+      html += '<div class="tbl-wrap" style="margin-top:10px"><table class="tbl"><thead><tr><th>Field</th><th>Current</th><th>Suggested</th></tr></thead><tbody>';
+      html += diff.map(function (d) {
+        return '<tr><td>' + escapeHTML(d.label) + '</td><td>' + escapeHTML(d.from) + '</td><td class="pos">' + escapeHTML(d.to) + '</td></tr>';
+      }).join('');
+      html += '</tbody></table></div>';
+      html += '<div class="btn-row"><button class="primary" data-action="swp-apply-rates">Apply ' + diff.length + ' change' + (diff.length === 1 ? '' : 's') + '</button>' +
+        '<button class="secondary" data-action="swp-discard-rates">Discard</button></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
   function renderSwpControls(c, errs) {
     var html = '';
 
@@ -1505,7 +1673,8 @@
     }
     tx += '<div class="divider"></div>';
     tx += '<div class="section-label">Tax rates</div>';
-    tx += '<div class="hint stale">⚠ These are placeholders from training knowledge, not verified current law. Indian rates move at almost every Budget — check equity STCG/LTCG, the LTCG exemption, NRI surcharge thresholds, cess and holding periods against the current Finance Act before trusting any number below.</div>';
+    tx += renderRateProvenance(c);
+    tx += renderRatePreview(c);
     tx += '<div class="row">' + swpInput('Equity STCG %', 'rates.eqStcg', errs, { step: '0.1' }) + swpInput('Equity LTCG %', 'rates.eqLtcg', errs, { step: '0.1' }) + '</div>';
     tx += '<div class="row">' + swpInput('LTCG annual exemption', 'rates.ltcgExemption', errs) + swpInput('Debt / slab %', 'rates.debtSlab', errs, { step: '0.1' }) + '</div>';
     tx += '<div class="row">' + swpInput('Cess %', 'rates.cess', errs, { step: '0.1' }) + swpInput('Equity holding (months)', 'rates.eqHoldMonths', errs) + '</div>';
@@ -1884,6 +2053,10 @@
     else if (action === 'swp-remove-lot') { S.swp.lots.splice(Number(el.dataset.index), 1); saveSwp(); render(); }
     else if (action === 'swp-toggle-ledger') { S.swp.ledgerExpanded = !S.swp.ledgerExpanded; saveSwp(); render(); }
     else if (action === 'swp-export-csv') { swpExportCsv(); }
+    else if (action === 'swp-fetch-rates') { fetchSwpRates(); }
+    else if (action === 'swp-apply-rates') { applySwpRates(); }
+    else if (action === 'swp-discard-rates') { discardSwpRates(); }
+    else if (action === 'swp-reset-rates') { if (confirm('Reset tax rates to the built-in defaults?')) resetSwpRates(); }
   }
 
   function onProviderChange(newProviderKey) {
