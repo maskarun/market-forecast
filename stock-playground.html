@@ -330,6 +330,17 @@
     'returnPct is the total percentage return across the whole period, not annualized. Return exactly 10 items, best first.'
   ].join(' ');
 
+  var TOP_CATS_SYSTEM_PROMPT = [
+    'You are a market reference for an educational investing sandbox — not live market data and not financial advice.',
+    'For each Indian mutual fund tax category listed below, name the five best-performing widely-recognized schemes in that category over the requested period, by approximate total return, from your training knowledge.',
+    'The categories are Indian income-tax classifications: "equity" = equity-oriented funds holding over 65% equity; "hybrid_eq" = hybrid funds taxed as equity; "hybrid_debt" = hybrid funds taxed as debt; "debt_new" = debt funds whose units were bought on or after 1 April 2023; "debt_legacy" = debt funds from before that date; "arbitrage" = arbitrage funds.',
+    'Use these exact category keys. Cover every category you can. Indian mutual fund schemes have no exchange ticker, so put a short recognizable scheme identifier in "ticker" and the full scheme name in "name".',
+    'Prefer well-known, currently-open schemes a retail investor could actually buy. Give your best good-faith estimate even without certainty; approximate figures are expected.',
+    'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
+    '{"groups":[{"category":"equity","items":[{"ticker":"<short id>","name":"<full scheme name>","returnPct":0}]}]}',
+    'returnPct is the total percentage return across the whole period, not annualized. Exactly five items per category, best first.'
+  ].join(' ');
+
   /* A model cannot look anything up — it recalls from training data with a cutoff,
      the same staleness the built-in placeholders warn about. So it is asked to
      declare which Finance Act it thinks it is describing and how sure it is, and
@@ -616,7 +627,9 @@
         'anthropic-version': '2023-06-01',
         'anthropic-dangerous-direct-browser-access': 'true'
       };
-      body = { model: pa.model, max_tokens: 1024, temperature: 0, system: systemPrompt, messages: [{ role: 'user', content: userContent }] };
+      // A ceiling, not a cost — only generated tokens bill. 1024 truncated the
+      // grouped 30-fund reply into a parse failure.
+      body = { model: pa.model, max_tokens: 4096, temperature: 0, system: systemPrompt, messages: [{ role: 'user', content: userContent }] };
     } else {
       var po = extractModelFromUrl(rawUrl);
       if (!po.model) return Promise.reject(new Error('Add ?model=<name> to the end of the URL, e.g. …/chat/completions?model=gpt-4o-mini.'));
@@ -862,32 +875,68 @@
    * ------------------------------------------------------------------- */
   function topKey(market, category, period) { return market + '|' + category + '|' + period; }
 
+  function normalizeTopItems(raw, limit) {
+    return (Array.isArray(raw) ? raw : []).slice(0, limit).map(function (it) {
+      return {
+        ticker: String(it && it.ticker == null ? '' : it.ticker).trim().toUpperCase(),
+        name: String(it && it.name == null ? '' : it.name).trim(),
+        returnPct: Number(it && it.returnPct)
+      };
+    }).filter(function (it) { return it.ticker || it.name; });
+  }
+
   function fetchTopList() {
     var t = S.top;
     var key = topKey(t.market, t.category, t.period);
+    var grouped = t.category === 'swpcats';
     S.topLoading = true; render();
-    var userContent = JSON.stringify({
-      market: topOption(TOP_MARKETS, t.market).prompt,
-      category: t.category,
-      period: topOption(TOP_PERIODS, t.period).prompt
-    });
-    llmChatRequest(TOP_SYSTEM_PROMPT, userContent).then(function (content) {
+    var userContent = JSON.stringify(grouped
+      ? { market: 'India', categories: SWP_CATEGORIES.map(function (c) { return c.v; }), period: topOption(TOP_PERIODS, t.period).prompt }
+      : {
+        market: topOption(TOP_MARKETS, t.market).prompt,
+        category: t.category,
+        period: topOption(TOP_PERIODS, t.period).prompt
+      });
+
+    llmChatRequest(grouped ? TOP_CATS_SYSTEM_PROMPT : TOP_SYSTEM_PROMPT, userContent).then(function (content) {
       var parsed = extractJSON(content);
-      if (!parsed || !Array.isArray(parsed.items)) throw new Error('Could not parse a top-10 list from the model response.');
-      var items = parsed.items.slice(0, 10).map(function (it) {
-        return {
-          ticker: String(it.ticker == null ? '' : it.ticker).trim().toUpperCase(),
-          name: String(it.name == null ? '' : it.name).trim(),
-          returnPct: Number(it.returnPct)
-        };
-      }).filter(function (it) { return it.ticker; });
-      if (!items.length) throw new Error('The model returned no usable entries for this list.');
-      S.topLists[key] = { fetchedAt: new Date().toISOString(), items: items };
-      saveTopLists();
-      toast('success', 'Loaded ' + items.length + ' results.');
+      if (grouped) {
+        if (!parsed || !Array.isArray(parsed.groups)) throw new Error('Could not parse the per-category lists from the model response.');
+        var byCat = {};
+        parsed.groups.forEach(function (g) {
+          if (!g || !g.category) return;
+          var items = normalizeTopItems(g.items, 5);
+          if (items.length) byCat[String(g.category).trim()] = items;
+        });
+        // Keep whatever came back rather than failing the lot; missing categories
+        // are reported in the UI.
+        var groups = SWP_CATEGORIES.filter(function (c) { return byCat[c.v]; })
+          .map(function (c) { return { category: c.v, items: byCat[c.v] }; });
+        if (!groups.length) throw new Error('The model returned no usable fund entries.');
+        S.topLists[key] = { fetchedAt: new Date().toISOString(), groups: groups };
+        saveTopLists();
+        var total = groups.reduce(function (s, g) { return s + g.items.length; }, 0);
+        toast('success', 'Loaded ' + total + ' funds across ' + groups.length + ' categories.');
+      } else {
+        if (!parsed || !Array.isArray(parsed.items)) throw new Error('Could not parse a top-10 list from the model response.');
+        var flat = normalizeTopItems(parsed.items, 10).filter(function (it) { return it.ticker; });
+        if (!flat.length) throw new Error('The model returned no usable entries for this list.');
+        S.topLists[key] = { fetchedAt: new Date().toISOString(), items: flat };
+        saveTopLists();
+        toast('success', 'Loaded ' + flat.length + ' results.');
+      }
     }).catch(function (err) {
       toast('error', err.message || 'Failed to load the list.');
     }).then(function () { S.topLoading = false; render(); });
+  }
+
+  function useSwpCategory(cat) {
+    S.swp.category = cat;
+    S.swpRateFetch.preview = null;
+    saveSwp();
+    S.tab = 'swp';
+    render();
+    toast('success', topOption(SWP_CATEGORIES, cat).l + ' set in the SWP planner.');
   }
 
   // Only ever invoked from a Top-tab row, so the selected market determines the
@@ -1468,8 +1517,20 @@
   }
 
   var TOP_CATEGORIES = [
-    { v: 'stocks', l: 'Stocks' }, { v: 'index', l: 'Index Funds' }, { v: 'mutual', l: 'Mutual Funds' }
+    { v: 'stocks', l: 'Stocks' }, { v: 'index', l: 'Index Funds' }, { v: 'mutual', l: 'Mutual Funds' },
+    // Indian income-tax classifications, so only meaningful for the India market.
+    { v: 'swpcats', l: 'By tax category', indiaOnly: true }
   ];
+  function topCategoriesFor(market) {
+    return TOP_CATEGORIES.filter(function (c) { return !c.indiaOnly || market === 'in'; });
+  }
+  // One-line plain-English tax treatment, read from the rates actually in effect.
+  function swpTaxNote(cat) {
+    var r = S.swp.rates;
+    if (cat.tax === 'slab_always') return 'taxed at slab rate however long it is held';
+    var months = cat.hold === 'eq' ? Number(r.eqHoldMonths) : Number(r.otherHoldMonths);
+    return 'taxed as ' + (cat.tax === 'equity' ? 'equity' : 'debt') + ' · long-term after ' + months + ' months';
+  }
   var TOP_MARKETS = [
     { v: 'in', l: 'India', prompt: 'India (securities listed on the NSE or BSE)', currency: 'INR' },
     { v: 'us', l: 'US', prompt: 'the United States (securities listed on the NYSE or NASDAQ)', currency: 'USD' }
@@ -1480,6 +1541,47 @@
     { v: '5y', l: '5 Years', prompt: 'the last 5 years', label: '5-year' }
   ];
   function topOption(list, value) { return list.filter(function (o) { return o.v === value; })[0] || list[0]; }
+
+  // Shared by the flat top-10 list and the per-category groups; the caller supplies
+  // the row's action attributes since the two views tap through to different tabs.
+  function rankRow(it, i, actionAttrs) {
+    var pctCls = Number.isFinite(it.returnPct) ? (it.returnPct >= 0 ? 'pos' : 'neg') : '';
+    var head = it.ticker || it.name;
+    var sub = it.ticker && it.name ? it.name : '';
+    return '<div class="rank-item" ' + actionAttrs + '>' +
+      '<div class="rank-num">' + (i + 1) + '</div>' +
+      '<div class="rank-body"><div class="rank-ticker">' + escapeHTML(head) + '</div>' +
+      (sub ? '<div class="rank-name">' + escapeHTML(sub) + '</div>' : '') + '</div>' +
+      '<div class="rank-ret ' + pctCls + '">' + (Number.isFinite(it.returnPct) ? fmtPercent(it.returnPct) : '—') + '</div>' +
+      '</div>';
+  }
+
+  function renderTopGroups(t, entry) {
+    var present = {};
+    entry.groups.forEach(function (g) { present[g.category] = g.items; });
+    var missing = SWP_CATEGORIES.filter(function (c) { return !present[c.v]; });
+
+    var html = '<div class="card">';
+    html += '<h2>Top 5 per tax category · India · ' + topOption(TOP_PERIODS, t.period).label + '</h2>';
+    // Rendered in SWP_CATEGORIES order, not whatever order the model replied in.
+    SWP_CATEGORIES.forEach(function (cat) {
+      var items = present[cat.v];
+      if (!items) return;
+      html += '<div class="section-label" style="margin-top:14px">' + escapeHTML(cat.l) + '</div>';
+      html += '<div class="hint" style="margin:-6px 0 8px">' + escapeHTML(swpTaxNote(cat)) + '</div>';
+      html += items.map(function (it, i) {
+        return rankRow(it, i, 'data-action="use-swp-category" data-category="' + escapeHTML(cat.v) + '"');
+      }).join('');
+    });
+    if (missing.length) {
+      html += '<div class="hint stale" style="margin-top:12px">The model returned nothing for: ' +
+        escapeHTML(missing.map(function (c) { return c.l; }).join(', ')) + '. Refresh to try again.</div>';
+    }
+    html += '<div class="hint">Tap any fund to open the SWP planner with that tax category selected. Fetched ' +
+      escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
+    html += '</div>';
+    return html;
+  }
 
   function renderTopTab() {
     var t = S.top;
@@ -1493,7 +1595,7 @@
     }).join('') + '</div>';
     html += '<div class="divider"></div>';
     html += '<h2>Category</h2>';
-    html += '<div class="toggle-pill">' + TOP_CATEGORIES.map(function (c) {
+    html += '<div class="toggle-pill">' + topCategoriesFor(t.market).map(function (c) {
       return '<button data-action="set-top-category" data-value="' + c.v + '" class="' + (t.category === c.v ? 'active' : '') + '">' + c.l + '</button>';
     }).join('') + '</div>';
     html += '<div class="divider"></div>';
@@ -1503,26 +1605,24 @@
     }).join('') + '</div>';
     html += '<div class="hint">Rankings come from the language model\'s training knowledge, not a live market feed — treat them as a rough, possibly out-of-date starting point for exploration. Past performance says nothing about future results, and none of this is financial advice.</div>';
     html += '<div class="btn-row"><button class="primary" data-action="fetch-top" ' + (S.topLoading ? 'disabled' : '') + '>' +
-      (S.topLoading ? '<span class="spinner"></span>Loading…' : (entry ? 'Refresh List' : 'Load Top 10')) + '</button></div>';
+      (S.topLoading ? '<span class="spinner"></span>Loading…'
+        : (entry ? 'Refresh List' : (t.category === 'swpcats' ? 'Load Top 5 per Category' : 'Load Top 10'))) + '</button></div>';
     html += '</div>';
 
-    if (entry) {
+    if (entry && entry.groups) {
+      html += renderTopGroups(t, entry);
+    } else if (entry) {
       html += '<div class="card">';
       html += '<h2>Top 10 · ' + escapeHTML(topOption(TOP_MARKETS, t.market).l) + ' · ' +
         escapeHTML(topOption(TOP_CATEGORIES, t.category).l) + ' · ' + topOption(TOP_PERIODS, t.period).label + '</h2>';
       html += entry.items.map(function (it, i) {
-        var pctCls = Number.isFinite(it.returnPct) ? (it.returnPct >= 0 ? 'pos' : 'neg') : '';
-        return '<div class="rank-item" data-action="use-ticker" data-ticker="' + escapeHTML(it.ticker) + '">' +
-          '<div class="rank-num">' + (i + 1) + '</div>' +
-          '<div class="rank-body"><div class="rank-ticker">' + escapeHTML(it.ticker) + '</div>' +
-          (it.name ? '<div class="rank-name">' + escapeHTML(it.name) + '</div>' : '') + '</div>' +
-          '<div class="rank-ret ' + pctCls + '">' + (Number.isFinite(it.returnPct) ? fmtPercent(it.returnPct) : '—') + '</div>' +
-          '</div>';
+        return rankRow(it, i, 'data-action="use-ticker" data-ticker="' + escapeHTML(it.ticker) + '"');
       }).join('');
       html += '<div class="hint">Tap any row to load that ticker into the What-If tab. Fetched ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
       html += '</div>';
     } else if (!S.topLoading) {
-      html += '<div class="empty">No list loaded yet.<br>Pick a market, category and period, then tap "Load Top 10".</div>';
+      html += '<div class="empty">No list loaded yet.<br>Pick a market, category and period, then tap "' +
+        (t.category === 'swpcats' ? 'Load Top 5 per Category' : 'Load Top 10') + '".</div>';
     }
 
     return html;
@@ -2040,11 +2140,18 @@
     else if (action === 'delete-scenario') { e.stopPropagation(); if (confirm('Delete this saved scenario?')) deleteScenario(el.dataset.id); }
     else if (action === 'test-connection') { testConnection(); }
     else if (action === 'clear-cache') { if (confirm('Clear all cached prices?')) clearCache(); }
-    else if (action === 'set-top-market') { S.top.market = el.dataset.value; saveTopPrefs(); render(); }
+    else if (action === 'set-top-market') {
+      S.top.market = el.dataset.value;
+      // The tax-category view is India-only; don't leave the UI on an option
+      // that no longer exists for the selected market.
+      if (S.top.category === 'swpcats' && S.top.market !== 'in') S.top.category = 'stocks';
+      saveTopPrefs(); render();
+    }
     else if (action === 'set-top-category') { S.top.category = el.dataset.value; saveTopPrefs(); render(); }
     else if (action === 'set-top-period') { S.top.period = el.dataset.value; saveTopPrefs(); render(); }
     else if (action === 'fetch-top') { fetchTopList(); }
     else if (action === 'use-ticker') { useTicker(el.dataset.ticker); }
+    else if (action === 'use-swp-category') { useSwpCategory(el.dataset.category); }
     else if (action === 'swp-toggle-section') { S.swp.openSections[el.dataset.key] = !S.swp.openSections[el.dataset.key]; saveSwp(); render(); }
     else if (action === 'swp-entry-mode') { S.swp.entryMode = el.dataset.value; saveSwp(); render(); }
     else if (action === 'swp-amount-mode') { S.swp.amountMode = el.dataset.value; saveSwp(); render(); }
