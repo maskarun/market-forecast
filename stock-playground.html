@@ -259,8 +259,33 @@
     topprefs: 'stockplay.topprefs.v1',
     swp: 'stockplay.swp.v1',
     analysis: 'stockplay.analysis.v1',
-    holdings: 'stockplay.holdings.v1'
+    holdings: 'stockplay.holdings.v1',
+    portfolio: 'stockplay.portfolio.v1'
   };
+
+  /* Allocation across sleeves that behave differently is the decision that drives
+     most of a portfolio's return variability — far more than which fund fills each
+     sleeve. Templates below are conventional starting points, not prescriptions. */
+  var ASSET_CLASSES = [
+    { v: 'eq_in', l: 'Indian equity', equity: true },
+    { v: 'eq_intl', l: 'International equity', equity: true },
+    { v: 'debt', l: 'Debt', equity: false },
+    { v: 'gold', l: 'Gold', equity: false },
+    { v: 'cash', l: 'Cash', equity: false }
+  ];
+  var HORIZONS = [
+    { v: 'short', l: 'Under 3 years', maxEquityPct: 10, targets: { eq_in: 0, eq_intl: 0, debt: 90, gold: 0, cash: 10 } },
+    { v: 'medium', l: '3–7 years', maxEquityPct: 65, targets: { eq_in: 30, eq_intl: 10, debt: 50, gold: 10, cash: 0 } },
+    { v: 'long', l: '7 years+', maxEquityPct: 100, targets: { eq_in: 50, eq_intl: 20, debt: 20, gold: 10, cash: 0 } }
+  ];
+  function defaultPortfolio() {
+    return {
+      horizon: 'long',
+      targets: Object.assign({}, HORIZONS[2].targets),
+      band: 5,
+      contribution: 0
+    };
+  }
 
   /* ---------------------------------------------------------------------
    * SWP fund categories. `tax` picks the rate set; `hold` picks which
@@ -425,6 +450,9 @@
     topLoading: false,
     analysis: {},
     holdings: {},
+    portfolio: defaultPortfolio(),
+    portfolioResult: null,
+    portfolioFetch: { loading: false, error: '' },
     // Transient per-ticker fetch state for the detail panel; never persisted.
     detailFetch: { loading: false, priceError: '', analysisError: '' },
     swp: defaultSwp(),
@@ -514,6 +542,9 @@
     S.swp = mergeSwp(loadJSON(STORE.swp, null));
     S.analysis = loadJSON(STORE.analysis, {});
     S.holdings = loadJSON(STORE.holdings, {});
+    var savedPf = loadJSON(STORE.portfolio, null);
+    S.portfolio = Object.assign(defaultPortfolio(), savedPf || {});
+    S.portfolio.targets = Object.assign({}, defaultPortfolio().targets, (savedPf && savedPf.targets) || {});
     // `detail` is a transient sub-view, not a saved preference.
     S.top.detail = null;
   }
@@ -543,6 +574,7 @@
   function saveSwp() { saveJSON(STORE.swp, S.swp); }
   function saveAnalysis() { saveJSON(STORE.analysis, S.analysis); }
   function saveHoldings() { saveJSON(STORE.holdings, S.holdings); }
+  function savePortfolio() { saveJSON(STORE.portfolio, S.portfolio); }
 
   /* ---------------------------------------------------------------------
    * Small utilities
@@ -569,7 +601,9 @@
   function fmtCurrency(amount, currency) {
     if (!Number.isFinite(amount)) return '—';
     try {
-      return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency || 'USD', maximumFractionDigits: 2 }).format(amount);
+      // Rupees group in lakh/crore, which the browser's default locale won't do.
+      var locale = currency === 'INR' ? 'en-IN' : undefined;
+      return new Intl.NumberFormat(locale, { style: 'currency', currency: currency || 'USD', maximumFractionDigits: 2 }).format(amount);
     } catch (e) {
       return (currency || '') + ' ' + amount.toLocaleString(undefined, { maximumFractionDigits: 2 });
     }
@@ -1402,6 +1436,227 @@
       + taxableLt * baseRateFor(EQUITY_TAX_CAT, true, rates) / 100;
     var sur = surchargePct(rates.surcharge, taxableSt + taxableLt);
     return base * (1 + sur / 100) * (1 + (Number(rates.cess) || 0) / 100);
+  }
+
+  /* ---------------------------------------------------------------------
+   * Portfolio maths. All deterministic. There is deliberately no optimiser:
+   * mean-variance weights swing wildly on unknowable expected-return inputs,
+   * so this checks a portfolio against measurable things instead of claiming
+   * to compute an optimum.
+   * ------------------------------------------------------------------- */
+  function holdingEntries() {
+    return Object.keys(S.holdings).map(function (t) {
+      var h = S.holdings[t] || {};
+      return {
+        ticker: t, name: h.name || '',
+        assetClass: h.assetClass || 'eq_in',
+        lots: Array.isArray(h.lots) ? h.lots : [],
+        priceOverride: h.priceOverride
+      };
+    });
+  }
+  function holdingValue(entry) {
+    var stats = detailPriceStats(entry.ticker);
+    var manual = Number(entry.priceOverride);
+    var price = Number.isFinite(manual) && manual > 0 ? manual : (stats && stats.last ? stats.last.price : null);
+    var units = entry.lots.reduce(function (s, l) { return s + (Number(l.units) || 0); }, 0);
+    var basis = entry.lots.reduce(function (s, l) { return s + (Number(l.units) || 0) * (Number(l.price) || 0); }, 0);
+    return { price: price, units: units, basis: basis, value: price != null ? units * price : null };
+  }
+
+  function computeAllocation() {
+    var rows = holdingEntries().map(function (e) {
+      return Object.assign(e, holdingValue(e));
+    }).filter(function (e) { return e.units > 0; });
+    var priced = rows.filter(function (e) { return e.value != null; });
+    var total = priced.reduce(function (s, e) { return s + e.value; }, 0);
+    var bySleeve = {};
+    ASSET_CLASSES.forEach(function (c) { bySleeve[c.v] = { value: 0, holdings: [] }; });
+    priced.forEach(function (e) {
+      if (!bySleeve[e.assetClass]) bySleeve[e.assetClass] = { value: 0, holdings: [] };
+      bySleeve[e.assetClass].value += e.value;
+      bySleeve[e.assetClass].holdings.push(e);
+    });
+    return {
+      rows: rows, priced: priced, total: total, bySleeve: bySleeve,
+      unpriced: rows.filter(function (e) { return e.value == null; })
+    };
+  }
+
+  function targetsTotal(t) {
+    return ASSET_CLASSES.reduce(function (s, c) { return s + (Number(t[c.v]) || 0); }, 0);
+  }
+
+  // Rebalance amounts sum to zero by construction — one sleeve's excess is another's
+  // shortfall. Only sleeves outside the band are worth acting on.
+  function rebalancePlan(alloc, targets, bandPct) {
+    var total = alloc.total;
+    return ASSET_CLASSES.map(function (c) {
+      var cur = (alloc.bySleeve[c.v] || { value: 0 }).value;
+      var curPct = total > 0 ? cur / total * 100 : 0;
+      var tgtPct = Number(targets[c.v]) || 0;
+      var drift = curPct - tgtPct;
+      return {
+        cls: c, currentValue: cur, currentPct: curPct, targetPct: tgtPct,
+        drift: drift, amount: total * tgtPct / 100 - cur,
+        actionable: Math.abs(drift) > bandPct
+      };
+    });
+  }
+
+  /* Directing new money at the underweight sleeves corrects drift without
+     realising a gain — which for an NRI facing TDS on every redemption is
+     usually the difference that matters. */
+  function contributionPlan(plan, contribution) {
+    var short = plan.filter(function (p) { return p.amount > 0; });
+    var need = short.reduce(function (s, p) { return s + p.amount; }, 0);
+    var give = Math.min(Math.max(0, contribution), need);
+    var alloc = {};
+    short.forEach(function (p) { alloc[p.cls.v] = need > 0 ? give * (p.amount / need) : 0; });
+    return { contribution: give, covers: need > 0 ? give / need * 100 : 100, need: need, alloc: alloc, unmet: need - give };
+  }
+
+  // FIFO: oldest lots go first, which is also how Indian equity gains are computed.
+  function sellFromLots(lots, amount, price, today, rates) {
+    var ordered = lots.slice().filter(function (l) { return (Number(l.units) || 0) > 0 && l.date; })
+      .sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+    var remaining = price > 0 ? amount / price : 0;
+    var unitsSold = 0, basis = 0, stGain = 0, ltGain = 0, slices = [];
+    for (var i = 0; i < ordered.length && remaining > 1e-9; i++) {
+      var take = Math.min(Number(ordered[i].units) || 0, remaining);
+      if (take <= 0) continue;
+      remaining -= take; unitsSold += take;
+      var cost = take * (Number(ordered[i].price) || 0);
+      var gain = take * price - cost;
+      var lt = isLongTerm(EQUITY_TAX_CAT, monthsBetween(ordered[i].date, today), rates);
+      basis += cost;
+      if (lt) ltGain += gain; else stGain += gain;
+      slices.push({ date: ordered[i].date, units: take, gain: gain, lt: lt });
+    }
+    return {
+      unitsSold: unitsSold, proceeds: unitsSold * price, basis: basis,
+      stGain: stGain, ltGain: ltGain, slices: slices,
+      shortfall: remaining > 1e-9 ? remaining * price : 0,
+      tax: estimateEquityTax(stGain, ltGain, rates)
+    };
+  }
+
+  function correlationOf(pairs) {
+    var b = betaOf(pairs);
+    return b ? b.correlation : null;
+  }
+
+  /* Real holdings overlap needs portfolio composition we cannot obtain. Correlation
+     of monthly returns is the computable stand-in: two funds moving together at 0.97
+     are one bet whatever their factsheets claim. */
+  function correlationMatrix(tickers, dates) {
+    var series = {};
+    tickers.forEach(function (t) { series[t] = seriesFrom(t, dates); });
+    return tickers.map(function (a) {
+      return tickers.map(function (b) {
+        if (a === b) return 1;
+        var pairs = alignSeries(series[a], series[b]);
+        return pairs.length > 3 ? correlationOf(pairs) : null;
+      });
+    });
+  }
+
+  // Fixed weights rebalanced monthly — the standard way to backtest an allocation.
+  function blendSeries(components, dates) {
+    var totalW = components.reduce(function (s, c) { return s + c.weight; }, 0);
+    if (!(totalW > 0)) return [];
+    var norm = components.map(function (c) {
+      return { weight: c.weight / totalW, prices: seriesFrom(c.ticker, dates) };
+    });
+    var out = [], level = 100;
+    for (var i = 0; i < dates.length; i++) {
+      if (i === 0) { out.push({ date: dates[i], price: level }); continue; }
+      var step = 0, usable = 0;
+      norm.forEach(function (c) {
+        var prev = c.prices[i - 1].price, cur = c.prices[i].price;
+        if (Number.isFinite(prev) && prev > 0 && Number.isFinite(cur) && cur > 0) {
+          step += c.weight * (cur / prev); usable += c.weight;
+        }
+      });
+      if (usable <= 0) { out.push({ date: dates[i], price: null }); continue; }
+      level = level * (step / usable);
+      out.push({ date: dates[i], price: level });
+    }
+    return out;
+  }
+
+  var PORTFOLIO_THRESHOLDS = { correlation: 0.90, concentration: 25, equityFunds: 5 };
+
+  function buildPortfolioFlags(alloc, plan, matrix, tickers, horizon) {
+    var T = PORTFOLIO_THRESHOLDS, flags = [];
+    var band = Number(S.portfolio.band) || 5;
+
+    var drifted = plan.filter(function (p) { return p.actionable; });
+    flags.push(drifted.length ? {
+      level: 'concern',
+      title: drifted.length + ' sleeve' + (drifted.length > 1 ? 's' : '') + ' outside the ±' + band + 'pp band',
+      detail: drifted.map(function (p) {
+        return p.cls.l + ' ' + p.currentPct.toFixed(1) + '% vs ' + p.targetPct + '% target';
+      }).join('; ') + '. Drift changes your risk without you deciding to.'
+    } : {
+      level: 'pass', title: 'Every sleeve within the ±' + band + 'pp band',
+      detail: 'Allocation still matches the targets you set.'
+    });
+
+    // Horizon vs equity share — the decision that dominates everything else.
+    var eqPct = ASSET_CLASSES.filter(function (c) { return c.equity; })
+      .reduce(function (s, c) { return s + ((alloc.bySleeve[c.v] || { value: 0 }).value); }, 0);
+    eqPct = alloc.total > 0 ? eqPct / alloc.total * 100 : 0;
+    var h = HORIZONS.filter(function (x) { return x.v === horizon; })[0] || HORIZONS[2];
+    flags.push({
+      level: eqPct > h.maxEquityPct ? 'concern' : 'pass',
+      title: 'Equity is ' + eqPct.toFixed(0) + '% against a "' + h.l.toLowerCase() + '" horizon',
+      detail: eqPct > h.maxEquityPct
+        ? 'Above the ' + h.maxEquityPct + '% ceiling conventionally used for this horizon. Equity can stay down for years; fund quality does not change that.'
+        : 'Within the ' + h.maxEquityPct + '% ceiling conventionally used for this horizon.'
+    });
+
+    if (matrix && tickers.length > 1) {
+      var dup = [];
+      for (var i = 0; i < tickers.length; i++) {
+        for (var j = i + 1; j < tickers.length; j++) {
+          var c = matrix[i][j];
+          if (c != null && c > T.correlation) dup.push({ a: tickers[i], b: tickers[j], c: c });
+        }
+      }
+      flags.push(dup.length ? {
+        level: 'concern',
+        title: dup.length + ' holding pair' + (dup.length > 1 ? 's' : '') + ' above ' + T.correlation.toFixed(2) + ' correlation',
+        detail: dup.map(function (d) { return d.a + ' / ' + d.b + ' at ' + d.c.toFixed(2); }).join('; ') +
+          '. These move together — that is one bet held twice, at two sets of fees.'
+      } : {
+        level: 'pass', title: 'No holding pair above ' + T.correlation.toFixed(2) + ' correlation',
+        detail: 'Holdings move independently enough to be doing separate jobs.'
+      });
+    }
+
+    var big = alloc.priced.filter(function (e) { return alloc.total > 0 && e.value / alloc.total * 100 > T.concentration; });
+    if (big.length) {
+      flags.push({
+        level: 'concern',
+        title: big.length + ' holding' + (big.length > 1 ? 's' : '') + ' above ' + T.concentration + '% of the portfolio',
+        detail: big.map(function (e) { return e.ticker + ' at ' + (e.value / alloc.total * 100).toFixed(0) + '%'; }).join('; ') +
+          '. Single-holding risk beyond ' + T.concentration + '% starts to dominate the outcome.'
+      });
+    }
+
+    var eqFunds = alloc.priced.filter(function (e) {
+      var c = ASSET_CLASSES.filter(function (x) { return x.v === e.assetClass; })[0];
+      return c && c.equity;
+    }).length;
+    if (eqFunds > T.equityFunds) {
+      flags.push({
+        level: 'watch',
+        title: eqFunds + ' equity holdings',
+        detail: 'Beyond about ' + T.equityFunds + ', additional equity funds usually replicate each other rather than diversify — check the correlations below.'
+      });
+    }
+    return flags;
   }
 
   function useSwpCategory(cat) {
@@ -2829,6 +3084,207 @@
     toast('success', 'Exported ' + out.ledger.length + ' instalments.');
   }
 
+  /* ---------------------------------------------------------------------
+   * Portfolio tab
+   * ------------------------------------------------------------------- */
+  function analysePortfolio() {
+    var alloc = computeAllocation();
+    var tickers = alloc.priced.map(function (e) { return e.ticker; });
+    if (!tickers.length) { toast('error', 'Add holdings with units and a price first.'); return; }
+    var bench = activeBenchmark(S.top.market);
+    var dates = monthlyDates(10);
+    S.portfolioFetch = { loading: true, error: '' };
+    render();
+    var all = tickers.concat([bench]);
+    Promise.all(all.map(function (t) { return fetchPrices(t, dates); }))
+      .then(function () {
+        var matrix = correlationMatrix(tickers, dates);
+        var blended = blendSeries(alloc.priced.map(function (e) {
+          return { ticker: e.ticker, weight: e.value };
+        }), dates);
+        var stats = computePriceStats(blended);
+        var benchSeries = seriesFrom(bench, dates);
+        var pairs = alignSeries(blended, benchSeries);
+        S.portfolioResult = {
+          at: new Date().toISOString(), tickers: tickers, benchmark: bench,
+          matrix: matrix, stats: stats, drawdown: drawdownDetail(blended),
+          rolling: pairs.length > 37 ? rollingWindows(pairs, 36) : null,
+          months: blended.filter(function (p) { return p.price != null; }).length
+        };
+        toast('success', 'Analysed ' + tickers.length + ' holdings over ' + S.portfolioResult.months + ' months.');
+      })
+      .catch(function (err) {
+        S.portfolioFetch.error = err.message || 'Could not analyse the portfolio.';
+        toast('error', S.portfolioFetch.error);
+      })
+      .then(function () { S.portfolioFetch.loading = false; render(); });
+  }
+
+  function renderPortfolioTab() {
+    var pf = S.portfolio;
+    var alloc = computeAllocation();
+    var cur = topOption(TOP_MARKETS, S.top.market).currency;
+    var tTotal = targetsTotal(pf.targets);
+    var plan = rebalancePlan(alloc, pf.targets, Number(pf.band) || 5);
+    var html = '';
+
+    // ---- Targets ----
+    html += '<div class="card"><h2>Target mix</h2>';
+    html += '<div class="hint">The split across sleeves drives most of your return variability — more than which fund fills each one. These templates are conventional starting points, not prescriptions; edit them freely.</div>';
+    html += '<div class="toggle-pill" style="margin-top:10px">' + HORIZONS.map(function (h) {
+      return '<button data-action="pf-horizon" data-value="' + h.v + '" class="' + (pf.horizon === h.v ? 'active' : '') + '">' + escapeHTML(h.l) + '</button>';
+    }).join('') + '</div>';
+    html += '<div class="divider"></div>';
+    html += ASSET_CLASSES.map(function (c) {
+      return '<div class="field"><label>' + escapeHTML(c.l) + ' %</label><input ' + swpNumAttrs() +
+        ' data-bind="portfolio.targets.' + c.v + '" value="' + escapeHTML(String(pf.targets[c.v])) + '"></div>';
+    }).join('');
+    if (Math.abs(tTotal - 100) > 0.01) {
+      html += '<div class="err">Targets total ' + tTotal.toFixed(1) + '% — ' +
+        (tTotal > 100 ? 'reduce by ' + (tTotal - 100).toFixed(1) : 'add ' + (100 - tTotal).toFixed(1)) + ' percentage points to reach 100%.</div>';
+    }
+    html += '<div class="row" style="margin-top:10px">' +
+      '<div class="field"><label>Rebalance band (±pp)</label><input ' + swpNumAttrs() + ' data-bind="portfolio.band" value="' + escapeHTML(String(pf.band)) + '"></div>' +
+      '<div class="field"><label>New money available</label><input ' + swpNumAttrs() + ' data-bind="portfolio.contribution" value="' + escapeHTML(String(pf.contribution)) + '"></div></div>';
+    html += '</div>';
+
+    // ---- Holdings ----
+    html += '<div class="card"><h2>Holdings</h2>';
+    html += '<div class="hint">Shared with the stock detail panel — anything entered there appears here. Assign each one a sleeve so the mix can be computed.</div>';
+    if (!alloc.rows.length) {
+      html += '<div class="empty">No holdings yet.<br>Add one below, or open a stock from the Top 10 tab and enter your lots there.</div>';
+    } else {
+      html += '<div class="tbl-wrap" style="margin-top:10px"><table class="tbl"><thead><tr><th>Holding</th><th>Sleeve</th><th>Units</th><th>Value</th><th>Weight</th><th></th></tr></thead><tbody>';
+      html += alloc.rows.map(function (e) {
+        var w = alloc.total > 0 && e.value != null ? e.value / alloc.total * 100 : null;
+        return '<tr><td>' + escapeHTML(e.ticker) + '</td>' +
+          '<td><select data-bind="holdings.' + escapeHTML(e.ticker) + '.assetClass">' + ASSET_CLASSES.map(function (c) {
+            return '<option value="' + c.v + '"' + (e.assetClass === c.v ? ' selected' : '') + '>' + escapeHTML(c.l) + '</option>';
+          }).join('') + '</select></td>' +
+          '<td>' + e.units.toFixed(3) + '</td>' +
+          '<td>' + (e.value == null ? '<span class="stale">no price</span>' : fmtCurrency(e.value, cur)) + '</td>' +
+          '<td>' + (w == null ? '—' : w.toFixed(1) + '%') + '</td>' +
+          '<td><button class="lot-del" data-action="pf-remove-holding" data-ticker="' + escapeHTML(e.ticker) + '">✕</button></td></tr>';
+      }).join('');
+      html += '</tbody></table></div>';
+      html += '<div class="hint">Total ' + fmtCurrency(alloc.total, cur) +
+        (alloc.unpriced.length ? ' · ' + alloc.unpriced.length + ' holding(s) excluded for want of a price — open them from Top 10 and set one.' : '') + '</div>';
+    }
+    html += '<div class="row" style="margin-top:10px">' +
+      '<div class="field"><label>Add ticker</label><input type="text" id="pf-new-ticker" placeholder="e.g. NIFTYBEES" autocapitalize="characters"></div>' +
+      '<div class="field"><label>&nbsp;</label><button class="secondary" data-action="pf-add-holding">Add holding</button></div></div>';
+    html += '</div>';
+
+    if (!alloc.priced.length) return html;
+
+    // ---- Drift ----
+    html += '<div class="card"><h2>Drift</h2>';
+    html += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Sleeve</th><th>Now</th><th>Target</th><th>Drift</th><th>Action</th></tr></thead><tbody>';
+    html += plan.map(function (p) {
+      return '<tr><td>' + escapeHTML(p.cls.l) + '</td><td>' + p.currentPct.toFixed(1) + '%</td><td>' + p.targetPct + '%</td>' +
+        '<td class="' + (Math.abs(p.drift) > (Number(pf.band) || 5) ? 'neg' : '') + '">' + fmtPercent(p.drift).replace('%', 'pp') + '</td>' +
+        '<td class="' + (p.amount >= 0 ? 'pos' : 'neg') + '">' + (Math.abs(p.amount) < 1 ? '—' : (p.amount > 0 ? 'add ' : 'trim ') + fmtCurrency(Math.abs(p.amount), cur)) + '</td></tr>';
+    }).join('');
+    html += '</tbody></table></div>';
+
+    // ---- Contribution-first ----
+    var cp = contributionPlan(plan, Number(pf.contribution) || 0);
+    if (cp.need > 0.5) {
+      html += '<div class="divider"></div><div class="section-label">Correcting it</div>';
+      if (cp.contribution > 0) {
+        html += '<div class="hint">Directing ' + fmtCurrency(cp.contribution, cur) + ' of new money at the underweight sleeves covers <strong>' +
+          cp.covers.toFixed(0) + '%</strong> of the gap and realises <strong>no gain, so no tax</strong>:</div>';
+        html += '<div class="stat-grid" style="margin-top:10px">' + ASSET_CLASSES.filter(function (c) { return cp.alloc[c.v] > 0.5; })
+          .map(function (c) { return stat(c.l, fmtCurrency(cp.alloc[c.v], cur), 'pos'); }).join('') + '</div>';
+        if (cp.unmet > 0.5) html += '<div class="hint">' + fmtCurrency(cp.unmet, cur) + ' of the shortfall would remain.</div>';
+      } else {
+        html += '<div class="hint">Enter an amount under “New money available” above to see how much of this gap contributions could close without selling.</div>';
+      }
+
+      // Tax cost of doing it by selling instead
+      var sells = plan.filter(function (p) { return p.amount < -1; });
+      if (sells.length) {
+        var today = todayISO(), lines = [], totSt = 0, totLt = 0;
+        sells.forEach(function (p) {
+          (alloc.bySleeve[p.cls.v].holdings || []).forEach(function (e) {
+            var share = p.currentValue > 0 ? e.value / p.currentValue : 0;
+            var amt = Math.abs(p.amount) * share;
+            if (amt < 1 || e.price == null) return;
+            var r = sellFromLots(e.lots, amt, e.price, today, S.swp.rates);
+            totSt += r.stGain; totLt += r.ltGain;
+            lines.push(e.ticker + ': sell ' + fmtCurrency(r.proceeds, cur) + ', gain ' +
+              fmtCurrency(r.stGain + r.ltGain, cur) + ' (' + fmtCurrency(r.stGain, cur) + ' short-term)');
+          });
+        });
+        if (lines.length) {
+          // One annual exemption across every sale, not one per holding — taxing each
+          // position separately would shelter the allowance once per line.
+          var totalTax = estimateEquityTax(totSt, totLt, S.swp.rates);
+          html += '<div class="hint stale" style="margin-top:10px">Doing the same correction by <strong>selling</strong> would realise ' +
+            fmtCurrency(totSt + totLt, cur) + ' of gains and cost about <strong>' + fmtCurrency(totalTax, cur) + '</strong> in tax today:<br>' +
+            lines.map(escapeHTML).join('<br>') +
+            '<br>Oldest lots first, with the annual exemption applied once across all of it, using the rate panel on the SWP tab. For an NRI, TDS comes off each redemption on top of this.</div>';
+        }
+      }
+    }
+    html += '</div>';
+
+    // ---- Deeper analysis ----
+    html += '<div class="card"><h2>Diversification &amp; history</h2>';
+    html += '<div class="btn-row"><button class="primary" data-action="pf-analyse"' + (S.portfolioFetch.loading ? ' disabled' : '') + '>' +
+      (S.portfolioFetch.loading ? '<span class="spinner"></span>Analysing…' : (S.portfolioResult ? 'Re-run analysis' : 'Analyse portfolio')) + '</button></div>';
+    if (S.portfolioFetch.error) html += '<div class="err">' + escapeHTML(S.portfolioFetch.error) + '</div>';
+
+    var res = S.portfolioResult;
+    if (!res) {
+      html += '<div class="hint">Fetches ten years of month-end prices for each holding plus the benchmark (' +
+        alloc.priced.length + ' + 1 lookups) to measure whether your holdings actually diversify each other, and how the combination has behaved.</div></div>';
+      return html;
+    }
+
+    var flags = buildPortfolioFlags(alloc, plan, res.matrix, res.tickers, pf.horizon);
+    html += '<div style="margin-top:6px">' + flags.map(function (f) {
+      return '<div class="flag"><span class="flag-dot ' + f.level + '"></span><div class="flag-body">' +
+        '<div class="flag-title">' + escapeHTML(f.title) + '</div>' +
+        '<div class="flag-detail">' + escapeHTML(f.detail) + '</div></div></div>';
+    }).join('') + '</div>';
+
+    if (res.tickers.length > 1) {
+      html += '<div class="divider"></div><div class="section-label">Correlation between holdings</div>';
+      html += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th></th>' +
+        res.tickers.map(function (t) { return '<th>' + escapeHTML(t) + '</th>'; }).join('') + '</tr></thead><tbody>';
+      html += res.matrix.map(function (row, i) {
+        return '<tr><td>' + escapeHTML(res.tickers[i]) + '</td>' + row.map(function (c, j) {
+          if (i === j) return '<td class="heat" style="background:rgba(255,255,255,.05)">—</td>';
+          if (c == null) return '<td class="heat">—</td>';
+          var t = Math.max(0, Math.min(1, (c + 1) / 2));
+          return '<td class="heat" style="background:hsla(' + Math.round((1 - t) * 140) + ',70%,45%,.32)">' + c.toFixed(2) + '</td>';
+        }).join('') + '</tr>';
+      }).join('');
+      html += '</tbody></table></div>';
+      html += '<div class="hint">Actual holdings overlap needs portfolio composition data no browser-only app can reach. Correlation of monthly returns is the computable stand-in — above ' +
+        PORTFOLIO_THRESHOLDS.correlation.toFixed(2) + ', two holdings are doing one job.</div>';
+    }
+
+    if (res.stats) {
+      html += '<div class="divider"></div><div class="section-label">The combination, at current weights</div>';
+      html += '<div class="stat-grid">';
+      html += stat('CAGR', Number.isFinite(res.stats.cagr) ? fmtPercent(res.stats.cagr) : '—', res.stats.cagr >= 0 ? 'pos' : 'neg');
+      html += stat('Volatility (ann.)', Number.isFinite(res.stats.volatility) ? res.stats.volatility.toFixed(1) + '%' : '—');
+      html += stat('Deepest fall', res.drawdown ? fmtPercent(res.drawdown.maxDD) : '—', 'neg');
+      html += stat('Recovered', res.drawdown ? (res.drawdown.recovered ? 'in ' + res.drawdown.recoveryMonths + ' mo' : 'not yet') : '—',
+        res.drawdown && res.drawdown.recovered ? 'pos' : 'neg');
+      if (res.rolling) {
+        html += stat('Beat ' + res.benchmark + ' (3y)', res.rolling.beatRate.toFixed(0) + '%', res.rolling.beatRate >= 50 ? 'pos' : 'neg');
+        html += stat('Worst 3y window', fmtPercent(res.rolling.worst.fund), 'neg');
+      }
+      html += '</div>';
+      html += '<div class="hint">Fixed weights rebalanced monthly across ' + res.months + ' months of estimated month-end prices. The portfolio-level drawdown is the number that decides whether you could actually have held this — not each holding\'s.</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
   function renderHistoryTab() {
     if (S.scenarios.length === 0) return '<div class="empty">No saved scenarios yet.<br>Run a what-if and tap "Save Scenario" to keep it here.</div>';
     var html = '';
@@ -2884,13 +3340,14 @@
   var TABS = [
     { v: 'new', l: 'New', ic: '＋' },
     { v: 'top', l: 'Top 10', ic: '★' },
+    { v: 'port', l: 'Mix', ic: '◐' },
     { v: 'swp', l: 'SWP', ic: '₹' },
     { v: 'history', l: 'History', ic: '☰' },
     { v: 'settings', l: 'Settings', ic: '⚙' }
   ];
 
   function renderHeader() {
-    var titles = { new: 'What-If', top: 'Top 10', swp: 'SWP Planner', history: 'History', settings: 'Settings' };
+    var titles = { new: 'What-If', top: 'Top 10', port: 'Portfolio', swp: 'SWP Planner', history: 'History', settings: 'Settings' };
     return '<header class="topbar"><div class="brand"><span class="dot"></span>Playground · ' + titles[S.tab] + '</div></header>';
   }
 
@@ -2903,6 +3360,7 @@
   function render() {
     var body = S.tab === 'new' ? renderNewTab()
       : S.tab === 'top' ? renderTopTab()
+      : S.tab === 'port' ? renderPortfolioTab()
       : S.tab === 'swp' ? renderSwpTab()
       : S.tab === 'history' ? renderHistoryTab()
       : renderSettingsTab();
@@ -2964,6 +3422,30 @@
     else if (action === 'refresh-analysis') { fetchAnalysis(el.dataset.ticker); }
     else if (action === 'analysis-what-if') { useTicker(el.dataset.ticker); }
     else if (action === 'run-evidence') { runEvidence(el.dataset.ticker); }
+    else if (action === 'pf-horizon') {
+      var h = HORIZONS.filter(function (x) { return x.v === el.dataset.value; })[0];
+      S.portfolio.horizon = el.dataset.value;
+      if (h) S.portfolio.targets = Object.assign({}, h.targets);
+      savePortfolio(); render();
+    }
+    else if (action === 'pf-analyse') { analysePortfolio(); }
+    else if (action === 'pf-add-holding') {
+      var inp = document.getElementById('pf-new-ticker');
+      var tk = (inp && inp.value || '').trim().toUpperCase();
+      if (!tk) { toast('error', 'Enter a ticker to add.'); return; }
+      if (!S.holdings[tk]) S.holdings[tk] = { lots: [], priceOverride: '', assetClass: 'eq_in' };
+      if (!S.holdings[tk].lots.length) S.holdings[tk].lots.push({ id: uid(), units: '', price: '', date: todayISO() });
+      saveHoldings();
+      openAnalysis(tk, '');
+      toast('success', tk + ' added — enter its lots below.');
+    }
+    else if (action === 'pf-remove-holding') {
+      if (confirm('Remove ' + el.dataset.ticker + ' from your holdings?')) {
+        delete S.holdings[el.dataset.ticker];
+        S.portfolioResult = null;
+        saveHoldings(); render();
+      }
+    }
     else if (action === 'use-suggested-benchmark') {
       S.top.benchmark[el.dataset.market] = el.dataset.value;
       saveTopPrefs(); render();
@@ -3015,6 +3497,7 @@
     // SWP recalculates live on every input, per the spec. Raw strings are stored so
     // partial entry ("", "1.") types naturally; the engine coerces at every use.
     if (path.indexOf('top.benchmark.') === 0) { setPath(S, path, el.value); saveTopPrefs(); render(); return; }
+    if (path.indexOf('portfolio.') === 0) { setPath(S, path, el.value); savePortfolio(); render(); return; }
     // Holdings recalculate live like the SWP inputs, and store raw strings for the
     // same reason — partial entry has to type naturally.
     if (path.indexOf('holdings.') === 0) {
