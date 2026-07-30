@@ -193,6 +193,17 @@
   .lot-del { flex: 0 0 auto; background: var(--surface-2); border: 1px solid var(--border); color: var(--red); border-radius: var(--radius-sm); padding: 10px 11px; font-size: 13px; cursor: pointer; }
   .preview-box { background: var(--surface-2); border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: 12px; margin: 12px 0; }
   .preview-box h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--accent-2); }
+  .flag { display: flex; gap: 10px; align-items: flex-start; padding: 11px 0; border-bottom: 1px solid var(--border); }
+  .flag:last-child { border-bottom: none; }
+  .flag-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 9px; margin-top: 5px; }
+  .flag-dot.pass { background: var(--green); }
+  .flag-dot.watch { background: var(--amber); }
+  .flag-dot.concern { background: var(--red); }
+  .flag-dot.unknown { background: var(--text-faint); }
+  .flag-body { flex: 1; min-width: 0; }
+  .flag-title { font-size: 13px; font-weight: 600; }
+  .flag-detail { font-size: 11px; color: var(--text-dim); margin-top: 3px; line-height: 1.45; }
+  .flag-src { font-size: 9px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; margin-left: 6px; white-space: nowrap; }
 
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
@@ -345,8 +356,10 @@
     'For an individual company: fill profile, financials (most recent 3 fiscal years, newest first), earnings and valuation.',
     'For an index fund, ETF or mutual fund: fill profile (mandate, what it tracks or holds, typical expense ratio) and leave financials empty, earnings fields "Not known", and valuation numbers omitted — per-share earnings and P/E do not apply.',
     'revenue and netIncome are display strings with their own units (e.g. "₹9,74,864 Cr" or "$391.0B"). netMarginPct, pe and pb are plain numbers.',
+    'Also fill the "fund" object when the security is a fund or ETF: expenseRatioPct for the direct/lowest-cost plan, planNote naming which plan that is, the current manager and the date they took over (managerSince as YYYY-MM-DD), assets under management in crore, the SEBI or equivalent category label, the benchmark the scheme is measured against, and the share of the portfolio in its top ten holdings. Omit any of these you do not know — a missing field is treated as unknown, which is the honest outcome; a guessed expense ratio or manager date is not.',
+    'For an individual company leave the fund object out entirely.',
     'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
-    '{"asOf":"","note":"","profile":{"business":"","sector":"","moat":"","risks":[""]},"financials":[{"period":"","revenue":"","netIncome":"","netMarginPct":0}],"earnings":{"trend":"","beatMissPattern":"","typicalReportingMonths":""},"valuation":{"pe":0,"pb":0,"sectorContext":""}}'
+    '{"asOf":"","note":"","profile":{"business":"","sector":"","moat":"","risks":[""]},"financials":[{"period":"","revenue":"","netIncome":"","netMarginPct":0}],"earnings":{"trend":"","beatMissPattern":"","typicalReportingMonths":""},"valuation":{"pe":0,"pb":0,"sectorContext":""},"fund":{"expenseRatioPct":0,"planNote":"","managerName":"","managerSince":"","aumCr":0,"categoryLabel":"","benchmarkName":"","topTenPct":0}}'
   ].join(' ');
 
   var TOP_CATS_SYSTEM_PROMPT = [
@@ -407,7 +420,7 @@
     loading: false,
     activeResult: null,
     activeError: null,
-    top: { market: 'in', category: 'stocks', period: '1y', detail: null },
+    top: { market: 'in', category: 'stocks', period: '1y', detail: null, benchmark: {} },
     topLists: {},
     topLoading: false,
     analysis: {},
@@ -497,6 +510,7 @@
     S.topLists = migrateTopLists(rawTop);
     if (S.topLists !== rawTop) saveTopLists();
     S.top = Object.assign({}, S.top, loadJSON(STORE.topprefs, {}));
+    if (!S.top.benchmark || typeof S.top.benchmark !== 'object') S.top.benchmark = {};
     S.swp = mergeSwp(loadJSON(STORE.swp, null));
     S.analysis = loadJSON(STORE.analysis, {});
     S.holdings = loadJSON(STORE.holdings, {});
@@ -521,7 +535,10 @@
   function saveTopLists() { saveJSON(STORE.toplists, S.topLists); }
   // `detail` is a transient sub-view, so only the three selectors are persisted.
   function saveTopPrefs() {
-    saveJSON(STORE.topprefs, { market: S.top.market, category: S.top.category, period: S.top.period });
+    saveJSON(STORE.topprefs, {
+      market: S.top.market, category: S.top.category, period: S.top.period,
+      benchmark: S.top.benchmark || {}
+    });
   }
   function saveSwp() { saveJSON(STORE.swp, S.swp); }
   function saveAnalysis() { saveJSON(STORE.analysis, S.analysis); }
@@ -1009,8 +1026,33 @@
         pe: boundedNum(v.pe, 0, 10000),
         pb: boundedNum(v.pb, 0, 10000),
         sectorContext: cleanStr(v.sectorContext, 500)
-      }
+      },
+      fund: sanitizeFund(raw.fund)
     };
+  }
+  // A field that fails its bounds becomes null, which the flag builder renders as
+  // "not known" rather than letting a bad value pass as evidence.
+  function sanitizeFund(f) {
+    if (!f || typeof f !== 'object') return null;
+    var since = cleanStr(f.managerSince, 20);
+    var out = {
+      expenseRatioPct: boundedNum(f.expenseRatioPct, 0, 10),
+      planNote: cleanStr(f.planNote, 80),
+      managerName: cleanStr(f.managerName, 120),
+      managerSince: /^\d{4}-\d{2}-\d{2}$/.test(since) && since <= todayISO() ? since : '',
+      aumCr: boundedNum(f.aumCr, 0, 1e9),
+      categoryLabel: cleanStr(f.categoryLabel, 120),
+      benchmarkName: cleanStr(f.benchmarkName, 120),
+      topTenPct: boundedNum(f.topTenPct, 0, 100)
+    };
+    var any = Object.keys(out).some(function (k) { return out[k] !== null && out[k] !== ''; });
+    return any ? out : null;
+  }
+
+  function defaultBenchmark(market) { return market === 'in' ? 'NIFTY 50' : 'SPY'; }
+  function activeBenchmark(market) {
+    var over = S.top.benchmark && S.top.benchmark[market];
+    return (over && String(over).trim()) || defaultBenchmark(market);
   }
 
   // Month-end dates spanning `years` back from today, oldest first.
@@ -1061,6 +1103,229 @@
       cagr: cagr, maxDrawdown: maxDD, volatility: vol,
       sma10: sma10, vsSma10: (last.price / sma10 - 1) * 100, smaMonths: window.length
     };
+  }
+
+  /* ---------------------------------------------------------------------
+   * Evidence layer. Point-to-point returns depend entirely on their two
+   * endpoints, so these look at every overlapping window instead, and at how
+   * the security behaves when the benchmark falls. All computed here; the
+   * model contributes nothing numeric to this block.
+   * ------------------------------------------------------------------- */
+  function alignSeries(a, b) {
+    var byDate = {};
+    b.forEach(function (p) { if (Number.isFinite(p.price) && p.price > 0) byDate[p.date] = p.price; });
+    var out = [];
+    a.forEach(function (p) {
+      if (Number.isFinite(p.price) && p.price > 0 && byDate[p.date]) {
+        out.push({ date: p.date, fund: p.price, bench: byDate[p.date] });
+      }
+    });
+    return out;
+  }
+  function median(arr) {
+    if (!arr.length) return null;
+    var s = arr.slice().sort(function (x, y) { return x - y; });
+    var m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+
+  // Every overlapping window of `months`, so a single lucky start date cannot
+  // carry the result the way a point-to-point figure can.
+  function rollingWindows(pairs, months) {
+    if (pairs.length <= months) return null;
+    var wins = [];
+    for (var i = 0; i + months < pairs.length; i++) {
+      var s = pairs[i], e = pairs[i + months];
+      var f = (e.fund / s.fund - 1) * 100;
+      var b = (e.bench / s.bench - 1) * 100;
+      wins.push({ start: s.date, end: e.date, fund: f, bench: b, excess: f - b });
+    }
+    var beat = wins.filter(function (w) { return w.excess > 0; }).length;
+    var worst = wins.reduce(function (a, w) { return w.fund < a.fund ? w : a; }, wins[0]);
+    return {
+      months: months, count: wins.length, windows: wins,
+      beatRate: beat / wins.length * 100,
+      medianFund: median(wins.map(function (w) { return w.fund; })),
+      medianExcess: median(wins.map(function (w) { return w.excess; })),
+      worst: worst,
+      best: wins.reduce(function (a, w) { return w.fund > a.fund ? w : a; }, wins[0])
+    };
+  }
+
+  function monthlyPairReturns(pairs) {
+    var out = [];
+    for (var i = 1; i < pairs.length; i++) {
+      out.push({
+        fund: pairs[i].fund / pairs[i - 1].fund - 1,
+        bench: pairs[i].bench / pairs[i - 1].bench - 1
+      });
+    }
+    return out;
+  }
+
+  // Average participation in rising vs falling benchmark months. Under 100 on the
+  // downside is the property worth paying an active fee for.
+  function captureRatios(pairs) {
+    var r = monthlyPairReturns(pairs);
+    var up = r.filter(function (x) { return x.bench > 0; });
+    var down = r.filter(function (x) { return x.bench < 0; });
+    var avg = function (list, k) {
+      return list.length ? list.reduce(function (a, x) { return a + x[k]; }, 0) / list.length : null;
+    };
+    var ub = avg(up, 'bench'), db = avg(down, 'bench');
+    return {
+      upMonths: up.length, downMonths: down.length,
+      upCapture: ub ? avg(up, 'fund') / ub * 100 : null,
+      downCapture: db ? avg(down, 'fund') / db * 100 : null
+    };
+  }
+
+  // Depth matters, but whether it has recovered — and how long that took —
+  // matters more when the money has a horizon.
+  function drawdownDetail(series) {
+    var pts = series.filter(function (p) { return Number.isFinite(p.price) && p.price > 0; });
+    if (pts.length < 2) return null;
+    var peak = pts[0].price, peakDate = pts[0].date;
+    var worst = { dd: 0, peakDate: pts[0].date, troughDate: pts[0].date, peakPrice: peak };
+    pts.forEach(function (p) {
+      if (p.price > peak) { peak = p.price; peakDate = p.date; }
+      var dd = (p.price / peak - 1) * 100;
+      if (dd < worst.dd) worst = { dd: dd, peakDate: peakDate, troughDate: p.date, peakPrice: peak };
+    });
+    if (worst.dd === 0) return { maxDD: 0, recovered: true, recoveryMonths: 0 };
+    var troughIdx = pts.findIndex(function (p) { return p.date === worst.troughDate; });
+    var recoveryDate = null;
+    for (var i = troughIdx + 1; i < pts.length; i++) {
+      if (pts[i].price >= worst.peakPrice) { recoveryDate = pts[i].date; break; }
+    }
+    var peakIdx = pts.findIndex(function (p) { return p.date === worst.peakDate; });
+    var recIdx = recoveryDate ? pts.findIndex(function (p) { return p.date === recoveryDate; }) : -1;
+    return {
+      maxDD: worst.dd, peakDate: worst.peakDate, troughDate: worst.troughDate,
+      recovered: !!recoveryDate, recoveryDate: recoveryDate,
+      recoveryMonths: recIdx >= 0 ? recIdx - peakIdx : null,
+      monthsSinceTrough: pts.length - 1 - troughIdx
+    };
+  }
+
+  function betaOf(pairs) {
+    var r = monthlyPairReturns(pairs);
+    if (r.length < 3) return null;
+    var mf = r.reduce(function (a, x) { return a + x.fund; }, 0) / r.length;
+    var mb = r.reduce(function (a, x) { return a + x.bench; }, 0) / r.length;
+    var cov = 0, varB = 0, varF = 0;
+    r.forEach(function (x) {
+      cov += (x.fund - mf) * (x.bench - mb);
+      varB += (x.bench - mb) * (x.bench - mb);
+      varF += (x.fund - mf) * (x.fund - mf);
+    });
+    if (varB === 0) return null;
+    return {
+      beta: cov / varB,
+      correlation: varF > 0 ? cov / Math.sqrt(varB * varF) : null
+    };
+  }
+
+  function computeEvidence(fundSeries, benchSeries) {
+    var pairs = alignSeries(fundSeries, benchSeries);
+    if (pairs.length < 14) return null;
+    return {
+      pairs: pairs.length,
+      from: pairs[0].date, to: pairs[pairs.length - 1].date,
+      rolling: { r12: rollingWindows(pairs, 12), r36: rollingWindows(pairs, 36), r60: rollingWindows(pairs, 60) },
+      capture: captureRatios(pairs),
+      drawdown: drawdownDetail(fundSeries),
+      beta: betaOf(pairs)
+    };
+  }
+
+  /* Thresholds are conventional, not authoritative — every flag renders the
+     measured value and the cut-off applied so a reader can disagree with it. */
+  var EVIDENCE_THRESHOLDS = {
+    beatRate: { pass: 60, watch: 40 },
+    downCapture: { pass: 100, watch: 110 },
+    expense: { pass: 1, watch: 1.75 },
+    tenureYears: 3
+  };
+
+  function buildEvidenceFlags(ev, fund, benchLabel) {
+    var T = EVIDENCE_THRESHOLDS, flags = [];
+    var r36 = ev && ev.rolling.r36;
+
+    if (r36) {
+      var br = r36.beatRate;
+      flags.push({
+        level: br >= T.beatRate.pass ? 'pass' : br >= T.beatRate.watch ? 'watch' : 'concern',
+        title: 'Beat ' + benchLabel + ' in ' + br.toFixed(0) + '% of rolling 3-year windows',
+        detail: r36.count + ' overlapping windows. Pass at ≥' + T.beatRate.pass + '%, concern below ' + T.beatRate.watch + '%.'
+      });
+      flags.push({
+        level: r36.medianExcess > 0.5 ? 'pass' : r36.medianExcess > -0.5 ? 'watch' : 'concern',
+        title: 'Median 3-year excess return ' + fmtPercent(r36.medianExcess),
+        detail: 'Typical window returned ' + fmtPercent(r36.medianFund) + ' against the benchmark. Pass above 0.'
+      });
+      flags.push({
+        level: 'unknown',
+        title: 'Worst 3-year window: ' + fmtPercent(r36.worst.fund),
+        detail: 'Ending ' + fmtDate(r36.worst.end) + '. Context, not a pass or fail — it shows what a bad entry point looked like.'
+      });
+    } else {
+      flags.push({ level: 'unknown', title: 'Not enough history for rolling 3-year windows', detail: 'Needs at least 37 month-end points for the fund and its benchmark.' });
+    }
+
+    if (ev && ev.capture && ev.capture.downCapture != null) {
+      var dc = ev.capture.downCapture;
+      flags.push({
+        level: dc < T.downCapture.pass ? 'pass' : dc <= T.downCapture.watch ? 'watch' : 'concern',
+        title: 'Downside capture ' + dc.toFixed(0) + '%',
+        detail: 'Across ' + ev.capture.downMonths + ' falling months' +
+          (ev.capture.upCapture != null ? ', against ' + ev.capture.upCapture.toFixed(0) + '% upside capture' : '') +
+          '. Pass below ' + T.downCapture.pass + '%, concern above ' + T.downCapture.watch + '%.' +
+          // A negative ratio is legitimate but reads oddly, so name what it means.
+          (dc < 0 ? ' Negative means it rose on average in the months the benchmark fell.' : '')
+      });
+    }
+
+    var dd = ev && ev.drawdown;
+    if (dd && dd.maxDD < 0) {
+      flags.push({
+        level: dd.recovered ? 'pass' : 'watch',
+        title: 'Deepest fall ' + fmtPercent(dd.maxDD) + (dd.recovered ? ', recovered' : ', not yet recovered'),
+        detail: dd.recovered
+          ? 'Peak ' + fmtDate(dd.peakDate) + ' → trough ' + fmtDate(dd.troughDate) + ', back to the old high in ' + dd.recoveryMonths + ' months.'
+          : 'Trough ' + fmtDate(dd.troughDate) + ', still below the ' + fmtDate(dd.peakDate) + ' high ' + dd.monthsSinceTrough + ' months on.'
+      });
+    }
+
+    // Recall-sourced. An unknown stays unknown rather than quietly passing.
+    var f = fund || {};
+    if (f.expenseRatioPct != null) {
+      var er = f.expenseRatioPct;
+      flags.push({
+        level: er < T.expense.pass ? 'pass' : er <= T.expense.watch ? 'watch' : 'concern',
+        title: 'Expense ratio ' + er.toFixed(2) + '%' + (f.planNote ? ' (' + f.planNote + ')' : ''),
+        detail: 'Pass below ' + T.expense.pass + '%, concern above ' + T.expense.watch + '%. Cost predicts relative performance more reliably than past returns do.',
+        recall: true
+      });
+    } else {
+      flags.push({ level: 'unknown', title: 'Expense ratio not known', detail: 'The model did not report one. Check the scheme factsheet — this is the single most reliable predictor available.', recall: true });
+    }
+
+    if (f.managerSince) {
+      var yrs = monthsBetween(f.managerSince, todayISO()) / 12;
+      flags.push({
+        level: yrs >= T.tenureYears ? 'pass' : 'watch',
+        title: 'Manager tenure ' + yrs.toFixed(1) + ' years' + (f.managerName ? ' (' + f.managerName + ')' : ''),
+        detail: yrs >= T.tenureYears
+          ? 'Since ' + fmtDate(f.managerSince) + '. The record above was largely built under this manager.'
+          : 'Since ' + fmtDate(f.managerSince) + '. Much of the track record above predates them — pass at ≥' + T.tenureYears + ' years.',
+        recall: true
+      });
+    } else {
+      flags.push({ level: 'unknown', title: 'Manager tenure not known', detail: 'A change of manager can invalidate a long track record, so this is worth checking directly.', recall: true });
+    }
+
+    return flags;
   }
 
   /* ---- Tax-lot block: exact arithmetic on lots the user enters, since this
@@ -1189,6 +1454,38 @@
       S.detailFetch.loading = false;
       render();
       if (S.detailFetch.analysisError && S.detailFetch.priceError) toast('error', 'Could not load this stock.');
+    });
+  }
+
+  /* Ten years of month-end prices for the security *and* its benchmark — two calls,
+     so this is opt-in rather than firing when the panel opens. */
+  function runEvidence(ticker) {
+    var market = S.top.market;
+    var bench = activeBenchmark(market);
+    var dates = monthlyDates(10);
+    S.detailFetch.evidenceLoading = true;
+    S.detailFetch.evidenceError = '';
+    render();
+    Promise.all([
+      fetchPrices(ticker, dates),
+      fetchPrices(bench, dates)
+    ]).then(function () {
+      var ev = computeEvidence(seriesFrom(ticker, dates), seriesFrom(bench, dates));
+      if (!ev) throw new Error('Not enough overlapping price history to compare against ' + bench + '.');
+      S.analysis[ticker] = Object.assign({}, S.analysis[ticker], {
+        evidence: ev, evidenceBenchmark: bench, evidenceAt: new Date().toISOString()
+      });
+      saveAnalysis();
+      toast('success', 'Compared ' + ev.pairs + ' months against ' + bench + '.');
+    }).catch(function (err) {
+      S.detailFetch.evidenceError = err.message || 'Could not run the comparison.';
+      toast('error', S.detailFetch.evidenceError);
+    }).then(function () { S.detailFetch.evidenceLoading = false; render(); });
+  }
+  function seriesFrom(ticker, dates) {
+    return dates.map(function (dt) {
+      var k = cacheKey(ticker, dt);
+      return { date: dt, price: k in S.priceCache ? S.priceCache[k] : null };
     });
   }
 
@@ -1868,6 +2165,81 @@
     return html;
   }
 
+  function renderEvidence(ticker, market) {
+    var a = S.analysis[ticker] || {};
+    var ev = a.evidence, fund = a.fund;
+    var bench = activeBenchmark(market);
+    var html = '<div class="card"><h2>Evidence</h2>';
+
+    html += '<div class="field"><label>Benchmark to measure against</label>' +
+      '<input ' + swpNumAttrs() + ' data-bind="top.benchmark.' + market + '" value="' +
+      escapeHTML(String((S.top.benchmark && S.top.benchmark[market]) || '')) + '" placeholder="' + escapeHTML(defaultBenchmark(market)) + '"></div>';
+    if (fund && fund.benchmarkName && fund.benchmarkName.toLowerCase() !== bench.toLowerCase()) {
+      html += '<div class="hint">The model says this scheme is benchmarked to <strong>' + escapeHTML(fund.benchmarkName) +
+        '</strong>. <button class="hbtn" data-action="use-suggested-benchmark" data-market="' + market +
+        '" data-value="' + escapeHTML(fund.benchmarkName) + '">Use it</button></div>';
+    }
+    html += '<div class="btn-row"><button class="primary" data-action="run-evidence" data-ticker="' + escapeHTML(ticker) + '"' +
+      (S.detailFetch.evidenceLoading ? ' disabled' : '') + '>' +
+      (S.detailFetch.evidenceLoading ? '<span class="spinner"></span>Comparing 10 years…'
+        : (ev ? 'Re-run against ' + escapeHTML(bench) : 'Run evidence analysis')) + '</button></div>';
+
+    if (!ev) {
+      if (S.detailFetch.evidenceError) html += '<div class="err">' + escapeHTML(S.detailFetch.evidenceError) + '</div>';
+      html += '<div class="hint">Fetches ten years of month-end prices for ' + escapeHTML(ticker) + ' and ' + escapeHTML(bench) +
+        ' (two lookups) and compares every overlapping window, rather than the single start-and-end pair the returns above use.</div></div>';
+      return html;
+    }
+
+    var flags = buildEvidenceFlags(ev, fund, a.evidenceBenchmark || bench);
+    html += '<div style="margin-top:6px">' + flags.map(function (f) {
+      return '<div class="flag"><span class="flag-dot ' + f.level + '"></span><div class="flag-body">' +
+        '<div class="flag-title">' + escapeHTML(f.title) + (f.recall ? '<span class="flag-src">recalled</span>' : '') + '</div>' +
+        '<div class="flag-detail">' + escapeHTML(f.detail) + '</div></div></div>';
+    }).join('') + '</div>';
+
+    // Rolling windows across three horizons
+    var rows = [['1 year', ev.rolling.r12], ['3 years', ev.rolling.r36], ['5 years', ev.rolling.r60]]
+      .filter(function (r) { return r[1]; });
+    if (rows.length) {
+      html += '<div class="divider"></div><div class="section-label">Rolling windows vs ' + escapeHTML(a.evidenceBenchmark || bench) + '</div>';
+      html += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Window</th><th>Count</th><th>Beat rate</th><th>Median</th><th>Median excess</th><th>Worst</th></tr></thead><tbody>';
+      html += rows.map(function (r) {
+        var w = r[1];
+        return '<tr><td>' + r[0] + '</td><td>' + w.count + '</td><td class="' + (w.beatRate >= 50 ? 'pos' : 'neg') + '">' +
+          w.beatRate.toFixed(0) + '%</td><td>' + fmtPercent(w.medianFund) + '</td><td class="' + (w.medianExcess >= 0 ? 'pos' : 'neg') + '">' +
+          fmtPercent(w.medianExcess) + '</td><td class="neg">' + fmtPercent(w.worst.fund) + '</td></tr>';
+      }).join('');
+      html += '</tbody></table></div>';
+      html += '<div class="hint">Every overlapping window in the period, not a single start and end date. A high beat rate is consistency; one strong window is not.</div>';
+    }
+
+    html += '<div class="divider"></div><div class="stat-grid">';
+    html += stat('Upside capture', ev.capture.upCapture == null ? '—' : ev.capture.upCapture.toFixed(0) + '%');
+    html += stat('Downside capture', ev.capture.downCapture == null ? '—' : ev.capture.downCapture.toFixed(0) + '%',
+      ev.capture.downCapture != null && ev.capture.downCapture < 100 ? 'pos' : 'neg');
+    html += stat('Beta', ev.beta ? ev.beta.beta.toFixed(2) : '—');
+    html += stat('Correlation', ev.beta && ev.beta.correlation != null ? ev.beta.correlation.toFixed(2) : '—');
+    html += '</div>';
+
+    if (fund) {
+      var bits = [];
+      if (fund.categoryLabel) bits.push(escapeHTML(fund.categoryLabel));
+      if (fund.aumCr != null) bits.push('AUM ₹' + Math.round(fund.aumCr).toLocaleString('en-IN') + ' Cr');
+      if (fund.topTenPct != null) bits.push('top 10 = ' + fund.topTenPct.toFixed(0) + '% of portfolio');
+      if (bits.length) {
+        html += '<div class="hint" style="margin-top:12px">' + bits.join(' · ') +
+          '. Size is shown as context, not scored — a large AUM constrains a small-cap mandate but is harmless for a large-cap one, and there is no honest single threshold.</div>';
+      }
+    }
+
+    html += '<div class="hint stale">Computed from estimated month-end prices, not real NAV history. Rolling windows are the robust tier — multi-year aggregates absorb price error. Capture ratios and beta are month-by-month and therefore more sensitive; read them as direction, not precision.</div>';
+    html += '<div class="hint">' + ev.pairs + ' months compared, ' + escapeHTML(fmtDate(ev.from)) + ' to ' + escapeHTML(fmtDate(ev.to)) +
+      '. None of this says the fund suits <em>you</em> — that turns on your horizon, what you already hold, and whether the fee is buying anything an index fund would not.</div>';
+    html += '</div>';
+    return html;
+  }
+
   function renderLotBlock(ticker, stats, market, cur) {
     var h = holdingFor(ticker);
     var a = analyseLots(ticker, stats, market);
@@ -1956,6 +2328,7 @@
     html += '</div>';
 
     html += '<div class="card"><h2>Price behaviour</h2>' + renderDetailStats(stats, cur) + '</div>';
+    html += renderEvidence(ticker, t.market);
 
     if (a) {
       if (a.profile.business || a.profile.sector) {
@@ -2590,6 +2963,11 @@
     else if (action === 'close-analysis') { closeAnalysis(); }
     else if (action === 'refresh-analysis') { fetchAnalysis(el.dataset.ticker); }
     else if (action === 'analysis-what-if') { useTicker(el.dataset.ticker); }
+    else if (action === 'run-evidence') { runEvidence(el.dataset.ticker); }
+    else if (action === 'use-suggested-benchmark') {
+      S.top.benchmark[el.dataset.market] = el.dataset.value;
+      saveTopPrefs(); render();
+    }
     else if (action === 'add-holding-lot') {
       var tk = el.dataset.ticker;
       if (!S.holdings[tk]) S.holdings[tk] = { lots: [], priceOverride: '' };
@@ -2636,6 +3014,7 @@
     if (path.indexOf('settings.') === 0) { setPath(S, path, value); saveSettings(); return; }
     // SWP recalculates live on every input, per the spec. Raw strings are stored so
     // partial entry ("", "1.") types naturally; the engine coerces at every use.
+    if (path.indexOf('top.benchmark.') === 0) { setPath(S, path, el.value); saveTopPrefs(); render(); return; }
     // Holdings recalculate live like the SWP inputs, and store raw strings for the
     // same reason — partial entry has to type naturally.
     if (path.indexOf('holdings.') === 0) {
