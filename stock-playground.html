@@ -8,7 +8,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- theme-color must match --bg below; update both together -->
 <meta name="theme-color" content="#0b0e1a">
-<title>Stock/Bond/ETF What-If Playground</title>
+<title>Forecast</title>
 <style>
   :root {
     --bg: #0b0e1a;
@@ -47,7 +47,10 @@
     height: calc(var(--header-h) + var(--safe-top)); flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
     padding: var(--safe-top) 16px 0; border-bottom: 1px solid var(--border); background: var(--bg); position: sticky; top: 0; z-index: 10;
   }
-  header.topbar .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
+  header.topbar .brand {
+    display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px;
+    min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1 1 auto;
+  }
   header.topbar .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
   .hbtn {
     background: var(--surface-2); border: 1px solid var(--border); color: var(--text-dim);
@@ -86,6 +89,8 @@
     font-size: 13px; font-weight: 600; cursor: pointer; transition: background .15s, color .15s;
   }
   .toggle-pill button.active { background: var(--accent); color: #fff; }
+  .toggle-pill-sm { flex: 0 0 auto; padding: 2px; gap: 2px; }
+  .toggle-pill-sm button { padding: 5px 9px; font-size: 11px; }
 
   .checkrow { display: flex; align-items: center; gap: 8px; }
   .checkrow input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
@@ -353,8 +358,9 @@
 
   var SYSTEM_PROMPT = [
     'You are a historical securities price lookup service.',
-    'Given a ticker symbol, an asset type, and a list of dates, respond with the actual historical closing price',
+    'Given a ticker symbol, an asset type, a market, and a list of dates, respond with the actual historical closing price',
     '(nominal close, not adjusted) for each requested date, drawn from your knowledge of real market history.',
+    'The market field tells you which exchange the ticker is listed on — use it to disambiguate a ticker that could otherwise refer to a security on a different exchange.',
     'If the market was closed on a requested date (weekend or holiday), use the closing price from the most recent prior trading day, but still key the answer under the ORIGINAL requested date string.',
     'This powers an educational "what if I had invested" calculator — not real-time trading data, not financial advice — so your best good-faith estimate from training knowledge is exactly what is wanted, even without certainty.',
     'You must provide a numeric estimate for EVERY requested date; approximate is expected and acceptable. Only omit a date if the ticker plainly did not exist yet as of that date (e.g. before its IPO).',
@@ -797,7 +803,7 @@
   function fetchPrices(ticker, dates) {
     var needed = dates.filter(function (d) { return !(cacheKey(ticker, d) in S.priceCache); });
     if (needed.length === 0) return Promise.resolve();
-    var userContent = JSON.stringify({ ticker: ticker, assetType: S.draft.assetType, dates: needed });
+    var userContent = JSON.stringify({ ticker: ticker, assetType: S.draft.assetType, market: topOption(TOP_MARKETS, S.top.market).prompt, dates: needed });
     return llmChatRequest(SYSTEM_PROMPT, userContent).then(function (content) {
       var parsed = extractJSON(content);
       if (!parsed || !parsed.prices) throw new Error('Could not parse price JSON from the model response.');
@@ -2470,6 +2476,7 @@
     }).join('') + '</select></div>';
     html += '</div>';
     html += '<div class="field"><label>Currency (label only — no conversion is performed)</label><input type="text" data-bind="currency" value="' + escapeHTML(d.currency) + '" placeholder="USD"></div>';
+    html += '<div class="hint">Prices are looked up assuming the ' + escapeHTML(topOption(TOP_MARKETS, S.top.market).l) + ' market — change that in the header.</div>';
     html += '</div>';
 
     html += '<div class="card">';
@@ -2905,11 +2912,6 @@
     var html = '';
 
     html += '<div class="card">';
-    html += '<h2>Market</h2>';
-    html += '<div class="toggle-pill">' + TOP_MARKETS.map(function (m) {
-      return '<button data-action="set-top-market" data-value="' + m.v + '" class="' + (t.market === m.v ? 'active' : '') + '">' + m.l + '</button>';
-    }).join('') + '</div>';
-    html += '<div class="divider"></div>';
     html += '<h2>Category</h2>';
     html += '<div class="toggle-pill">' + topCategoriesFor(t.market).map(function (c) {
       return '<button data-action="set-top-category" data-value="' + c.v + '" class="' + (t.category === c.v ? 'active' : '') + '">' + c.l + '</button>';
@@ -2938,7 +2940,7 @@
       html += '<div class="hint">Tap any row for a detailed analysis. Fetched ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
       html += '</div>';
     } else if (!S.topLoading) {
-      html += '<div class="empty">No list loaded yet.<br>Pick a market, category and period, then tap "' +
+      html += '<div class="empty">No list loaded yet.<br>Pick a category and period, then tap "' +
         (t.category === 'swpcats' ? 'Load Top 5 per Category' : 'Load Top 10') + '".</div>';
     }
 
@@ -3836,7 +3838,10 @@
 
   function renderHeader() {
     var titles = { new: 'What-If', top: 'Top 10', port: 'Portfolio', swp: 'SWP Planner', history: 'History', settings: 'Settings' };
-    return '<header class="topbar"><div class="brand"><span class="dot"></span>Playground · ' + titles[S.tab] + '</div></header>';
+    var marketPill = '<div class="toggle-pill toggle-pill-sm">' + TOP_MARKETS.map(function (m) {
+      return '<button data-action="set-top-market" data-value="' + m.v + '" class="' + (S.top.market === m.v ? 'active' : '') + '">' + m.l + '</button>';
+    }).join('') + '</div>';
+    return '<header class="topbar"><div class="brand"><span class="dot"></span>Forecast · ' + titles[S.tab] + '</div>' + marketPill + '</header>';
   }
 
   function renderBottomNav() {
@@ -3898,6 +3903,9 @@
       // The tax-category view is India-only; don't leave the UI on an option
       // that no longer exists for the selected market.
       if (S.top.category === 'swpcats' && S.top.market !== 'in') S.top.category = 'stocks';
+      // The market selector is global now (header), so What-If's currency label
+      // should track it too, not just when arriving there via "Analyze".
+      S.draft.currency = topOption(TOP_MARKETS, S.top.market).currency;
       saveTopPrefs(); render();
     }
     else if (action === 'set-top-category') { S.top.category = el.dataset.value; saveTopPrefs(); render(); }
