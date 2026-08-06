@@ -286,7 +286,12 @@
       band: 5,
       contribution: 0,
       picks: {},
-      investAmount: 0
+      investAmount: 0,
+      btHorizon: 7,
+      btHurdle: 6,
+      btCashRate: 6,
+      btProxies: {},
+      btProxiesOpen: false
     };
   }
 
@@ -475,6 +480,8 @@
     portfolioFetch: { loading: false, error: '' },
     sleeves: {},
     sleevesFetch: { loading: false, error: '' },
+    btResult: null,
+    btFetch: { loading: false, error: '' },
     // Transient per-ticker fetch state for the detail panel; never persisted.
     detailFetch: { loading: false, priceError: '', analysisError: '' },
     swp: defaultSwp(),
@@ -568,6 +575,7 @@
     S.portfolio = Object.assign(defaultPortfolio(), savedPf || {});
     S.portfolio.targets = Object.assign({}, defaultPortfolio().targets, (savedPf && savedPf.targets) || {});
     if (!S.portfolio.picks || typeof S.portfolio.picks !== 'object') S.portfolio.picks = {};
+    if (!S.portfolio.btProxies || typeof S.portfolio.btProxies !== 'object') S.portfolio.btProxies = {};
     S.sleeves = loadJSON(STORE.sleeves, {});
     // `detail` is a transient sub-view, not a saved preference.
     S.top.detail = null;
@@ -1114,10 +1122,31 @@
     return (over && String(over).trim()) || defaultBenchmark(market);
   }
 
+  // Four proxies stand in for the equity/debt/gold sleeves in the horizon backtest;
+  // cash is modelled at a flat assumed rate rather than fetched (see runHorizonBacktest).
+  function defaultProxies(market) {
+    return market === 'in'
+      ? { eq_in: 'NIFTY 50', eq_intl: 'MSCI World Index', debt: 'NIFTY 10 Year Benchmark G-Sec Index', gold: 'Gold price in INR per 10 grams' }
+      : { eq_in: 'S&P 500', eq_intl: 'MSCI EAFE Index', debt: 'Bloomberg US Aggregate Bond Index', gold: 'Gold price in USD per troy ounce' };
+  }
+  function activeProxies(market) {
+    var over = S.portfolio.btProxies && S.portfolio.btProxies[market];
+    return Object.assign({}, defaultProxies(market), over || {});
+  }
+
   // Month-end dates spanning `years` back from today, oldest first.
   function monthlyDates(years) {
     var end = todayISO(), out = [];
     for (var i = years * 12; i >= 0; i--) out.push(addMonths(end, -i));
+    return out;
+  }
+
+  // One point per year. A horizon backtest needs decades of history to yield more
+  // than a handful of overlapping windows, and monthly recall is weak that far
+  // back — annual index levels are lighter and better recalled.
+  function annualDates(years) {
+    var end = todayISO(), out = [];
+    for (var i = years; i >= 0; i--) out.push(addMonths(end, -12 * i));
     return out;
   }
 
@@ -1608,6 +1637,105 @@
       out.push({ date: dates[i], price: level });
     }
     return out;
+  }
+
+  /* ---------------------------------------------------------------------
+   * Horizon backtest. If the objective is purely expected return, the answer
+   * is always maximum equity — that never changes with horizon. What changes
+   * is the worst plausible outcome, so every function here reports the worst
+   * window at least as prominently as the median. Cash is synthesised at a
+   * flat assumed rate; the other four sleeves run on annual index proxies.
+   * ------------------------------------------------------------------- */
+  function cashSeriesAt(i, cashRate) { return 100 * Math.pow(1 + (Number(cashRate) || 0) / 100, i); }
+
+  // Fixed weights, annually rebalanced (recomputing the weighted step every period
+  // is equivalent to rebalancing to target each time) — the standard way to
+  // backtest an allocation.
+  function blendMix(weights, proxySeries, dates, cashRate) {
+    var classes = ASSET_CLASSES.map(function (c) { return c.v; });
+    var totalW = classes.reduce(function (s, k) { return s + (Number(weights[k]) || 0); }, 0);
+    if (!(totalW > 0)) return [];
+    var norm = {};
+    classes.forEach(function (k) { norm[k] = (Number(weights[k]) || 0) / totalW; });
+    var out = [], level = 100;
+    for (var i = 0; i < dates.length; i++) {
+      if (i === 0) { out.push({ date: dates[i], price: level }); continue; }
+      var step = 0, usable = 0;
+      classes.forEach(function (k) {
+        var w = norm[k];
+        if (w <= 0) return;
+        var prev, cur;
+        if (k === 'cash') {
+          prev = cashSeriesAt(i - 1, cashRate); cur = cashSeriesAt(i, cashRate);
+        } else {
+          var s = proxySeries[k];
+          prev = s && s[i - 1] ? s[i - 1].price : null;
+          cur = s && s[i] ? s[i].price : null;
+        }
+        if (Number.isFinite(prev) && prev > 0 && Number.isFinite(cur) && cur > 0) {
+          step += w * (cur / prev); usable += w;
+        }
+      });
+      if (usable <= 0) { out.push({ date: dates[i], price: null }); continue; }
+      level = level * (step / usable);
+      out.push({ date: dates[i], price: level });
+    }
+    return out;
+  }
+
+  // Every overlapping N-year window, reported as an annualised rate. Distinct from
+  // rollingWindows (total return vs a benchmark, monthly): this is a single
+  // series' CAGR, annual granularity, which is the shape a horizon question needs.
+  function rollingCagr(series, years) {
+    var pts = series.filter(function (p) { return Number.isFinite(p.price) && p.price > 0; });
+    if (pts.length <= years) return null;
+    var wins = [];
+    for (var i = 0; i + years < pts.length; i++) {
+      var s = pts[i], e = pts[i + years];
+      wins.push({ start: s.date, end: e.date, cagr: (Math.pow(e.price / s.price, 1 / years) - 1) * 100 });
+    }
+    var vals = wins.map(function (w) { return w.cagr; });
+    return {
+      years: years, count: wins.length, windows: wins,
+      median: median(vals),
+      worst: wins.reduce(function (a, w) { return w.cagr < a.cagr ? w : a; }, wins[0]),
+      best: wins.reduce(function (a, w) { return w.cagr > a.cagr ? w : a; }, wins[0]),
+      sharePositive: vals.filter(function (v) { return v > 0; }).length / vals.length * 100
+    };
+  }
+  function hurdleShare(rc, hurdlePct) {
+    if (!rc || !rc.count) return null;
+    return rc.windows.filter(function (w) { return w.cagr >= hurdlePct; }).length / rc.count * 100;
+  }
+
+  function backtestMix(targets, proxySeries, dates, cashRate, horizonYears, hurdlePct) {
+    var series = blendMix(targets, proxySeries, dates, cashRate);
+    var rc = rollingCagr(series, horizonYears);
+    return { rolling: rc, drawdown: drawdownDetail(series), hurdleSharePct: hurdleShare(rc, hurdlePct) };
+  }
+
+  // Equity share swept 0→100%, holding the within-equity (domestic vs international)
+  // and within-defensive (debt/gold/cash) ratios from the user's own targets, so this
+  // answers "what if I dial my own mix up or down" rather than comparing unrelated
+  // portfolios. Falls back to a reasonable split when a side is entirely empty.
+  function sweepEquity(baseTargets) {
+    var eqIn = Number(baseTargets.eq_in) || 0, eqIntl = Number(baseTargets.eq_intl) || 0;
+    var eqTotal = eqIn + eqIntl;
+    var eqInShare = eqTotal > 0 ? eqIn / eqTotal : 0.7;
+    var defensive = ASSET_CLASSES.filter(function (c) { return !c.equity; });
+    var defTotal = defensive.reduce(function (s, c) { return s + (Number(baseTargets[c.v]) || 0); }, 0);
+    var defShare = {};
+    defensive.forEach(function (c) {
+      defShare[c.v] = defTotal > 0 ? (Number(baseTargets[c.v]) || 0) / defTotal : (c.v === 'debt' ? 0.7 : c.v === 'gold' ? 0.3 : 0);
+    });
+    var steps = [];
+    for (var eq = 0; eq <= 100; eq += 10) {
+      var t = { eq_in: eq * eqInShare, eq_intl: eq * (1 - eqInShare) };
+      var def = 100 - eq;
+      defensive.forEach(function (c) { t[c.v] = def * defShare[c.v]; });
+      steps.push({ equityPct: eq, targets: t });
+    }
+    return steps;
   }
 
   /* ---- Sleeve candidates ---------------------------------------------
@@ -3329,6 +3457,127 @@
     return html;
   }
 
+  // Four calls, not five: cash is a flat assumption, not fetched.
+  function runHorizonBacktest() {
+    var market = S.top.market;
+    var proxies = activeProxies(market);
+    var horizon = Number(S.portfolio.btHorizon) || 7;
+    var hurdle = S.portfolio.btHurdle != null ? Number(S.portfolio.btHurdle) : 6;
+    var cashRate = Number(S.portfolio.btCashRate) || 6;
+    // Enough span for a dozen-plus overlapping windows even at a 10-year horizon.
+    var years = Math.max(horizon + 18, 25);
+    var dates = annualDates(years);
+    var keys = ['eq_in', 'eq_intl', 'debt', 'gold'];
+    var tickers = keys.map(function (k) { return proxies[k]; });
+
+    S.btFetch = { loading: true, error: '' };
+    render();
+    Promise.all(tickers.map(function (t) { return fetchPrices(t, dates); }))
+      .then(function () {
+        var proxySeries = {};
+        keys.forEach(function (k) { proxySeries[k] = seriesFrom(proxies[k], dates); });
+
+        var compareDefs = HORIZONS.map(function (h) { return { label: h.l, targets: h.targets }; })
+          .concat([{ label: 'Your targets', targets: S.portfolio.targets }]);
+        var compare = compareDefs.map(function (d) {
+          var bt = backtestMix(d.targets, proxySeries, dates, cashRate, horizon, hurdle);
+          return { label: d.label, rolling: bt.rolling, drawdown: bt.drawdown, hurdleSharePct: bt.hurdleSharePct };
+        });
+        if (!compare.some(function (c) { return c.rolling; })) {
+          throw new Error('Not enough overlapping history at this horizon — try a shorter one.');
+        }
+
+        var sweep = sweepEquity(S.portfolio.targets).map(function (s) {
+          var bt = backtestMix(s.targets, proxySeries, dates, cashRate, horizon, hurdle);
+          return { equityPct: s.equityPct, rolling: bt.rolling, drawdown: bt.drawdown };
+        });
+
+        var withCount = compare.filter(function (c) { return c.rolling; })[0];
+        S.btResult = {
+          fetchedAt: new Date().toISOString(), years: years, horizon: horizon, hurdle: hurdle,
+          compare: compare, sweep: sweep, windowCount: withCount ? withCount.rolling.count : 0
+        };
+        // The full result (price series, every window) stays in memory only, like
+        // S.portfolioResult — but a lightweight timestamp is worth persisting so a
+        // reload can say when this last ran instead of looking like it never has.
+        S.portfolio.btAt = S.btResult.fetchedAt;
+        savePortfolio();
+        toast('success', 'Compared ' + (withCount ? withCount.rolling.count : 0) + ' overlapping ' + horizon + '-year windows.');
+      })
+      .catch(function (err) {
+        S.btFetch.error = err.message || 'Could not run the backtest.';
+        toast('error', S.btFetch.error);
+      })
+      .then(function () { S.btFetch.loading = false; render(); });
+  }
+
+  function renderHorizonBacktest() {
+    var pf = S.portfolio, market = S.top.market;
+    var proxies = activeProxies(market);
+    var horizon = Number(pf.btHorizon) || 7;
+    var hurdle = pf.btHurdle != null ? Number(pf.btHurdle) : 6;
+    var res = S.btResult;
+
+    var html = '<div class="card"><h2>Which mix, for how long</h2>';
+    html += '<div class="hint">If the only goal were the highest expected return, the answer would always be maximum equity — that does not change with horizon. What changes is the <strong>worst plausible outcome</strong>, shown first below rather than the average, because that is the part a horizon decision actually has to survive. There is no mix that reliably yields good returns; there are mixes whose worst case a given horizon can absorb.</div>';
+
+    html += '<div class="row" style="margin-top:10px">' +
+      '<div class="field"><label>Horizon</label><select data-bind="portfolio.btHorizon">' +
+      [3, 5, 7, 10].map(function (y) { return '<option value="' + y + '"' + (horizon === y ? ' selected' : '') + '>' + y + ' years</option>'; }).join('') +
+      '</select></div>' +
+      '<div class="field"><label>Hurdle %/yr</label><input ' + swpNumAttrs() + ' data-bind="portfolio.btHurdle" value="' + escapeHTML(String(pf.btHurdle == null ? 6 : pf.btHurdle)) + '"></div></div>';
+    html += '<div class="field"><label>Assumed cash return %/yr (not fetched — an assumption, not measured history)</label>' +
+      '<input ' + swpNumAttrs() + ' data-bind="portfolio.btCashRate" value="' + escapeHTML(String(pf.btCashRate)) + '"></div>';
+
+    html += '<button class="acc-hdr" data-action="pf-toggle-proxies" aria-expanded="' + (!!pf.btProxiesOpen) + '" style="margin-top:12px">' +
+      '<span>Index proxies used</span><span class="chev">▶</span></button>';
+    if (pf.btProxiesOpen) {
+      html += '<div class="acc-body">' + ['eq_in', 'eq_intl', 'debt', 'gold'].map(function (k) {
+        return '<div class="field"><label>' + escapeHTML(topOption(ASSET_CLASSES, k).l) + ' proxy</label>' +
+          '<input type="text" data-bind="portfolio.btProxies.' + market + '.' + k + '" value="' + escapeHTML(proxies[k]) + '"></div>';
+      }).join('') + '</div>';
+    }
+
+    html += '<div class="btn-row"><button class="primary" data-action="pf-backtest"' + (S.btFetch.loading ? ' disabled' : '') + '>' +
+      (S.btFetch.loading ? '<span class="spinner"></span>Running…' : (res ? 'Re-run backtest' : 'Run backtest')) + '</button></div>';
+    if (S.btFetch.error) html += '<div class="err">' + escapeHTML(S.btFetch.error) + '</div>';
+
+    if (!res) {
+      html += '<div class="hint">Fetches roughly ' + Math.max(horizon + 18, 25) + ' years of estimated annual index levels for four proxies (domestic equity, international equity, debt, gold) — cash runs on the assumed rate above instead of a fifth lookup.' +
+        (pf.btAt ? ' Last run ' + escapeHTML(new Date(pf.btAt).toLocaleString()) + ' — results aren\'t kept across a reload, so re-run to refresh them.' : '') + '</div></div>';
+      return html;
+    }
+
+    html += '<div class="divider"></div><div class="section-label">Compare at ' + res.horizon + ' years</div>';
+    html += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Mix</th><th>Worst window</th><th>Median</th><th>Best</th><th>Beat ' + res.hurdle + '%/yr</th><th>Deepest fall</th></tr></thead><tbody>';
+    html += res.compare.map(function (row) {
+      return '<tr><td>' + escapeHTML(row.label) + '</td>' +
+        '<td class="' + (row.rolling && row.rolling.worst.cagr < 0 ? 'neg' : '') + '">' + (row.rolling ? fmtPercent(row.rolling.worst.cagr) : '—') + '</td>' +
+        '<td>' + (row.rolling ? fmtPercent(row.rolling.median) : '—') + '</td>' +
+        '<td class="pos">' + (row.rolling ? fmtPercent(row.rolling.best.cagr) : '—') + '</td>' +
+        '<td>' + (row.hurdleSharePct == null ? '—' : row.hurdleSharePct.toFixed(0) + '%') + '</td>' +
+        '<td class="neg">' + (row.drawdown ? fmtPercent(row.drawdown.maxDD) : '—') + '</td></tr>';
+    }).join('');
+    html += '</tbody></table></div>';
+    html += '<div class="hint">Based on ' + res.windowCount + ' overlapping ' + res.horizon + '-year windows drawn from ' + res.years +
+      ' years of estimated annual index levels. Overlapping windows share most of their data, so this is not ' + res.windowCount +
+      ' independent trials — read it as one history sliced multiple ways. "Equity always wins over the long run" is largely a US-specific finding; other major markets, Japan among them, have gone 20+ years without a real peak recovering.</div>';
+
+    html += '<div class="divider"></div><div class="section-label">Dialling equity up or down from your mix</div>';
+    html += '<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Equity</th><th>Worst window</th><th>Median</th><th>Deepest fall</th></tr></thead><tbody>';
+    html += res.sweep.map(function (row) {
+      return '<tr><td>' + row.equityPct + '%</td>' +
+        '<td class="' + (row.rolling && row.rolling.worst.cagr < 0 ? 'neg' : '') + '">' + (row.rolling ? fmtPercent(row.rolling.worst.cagr) : '—') + '</td>' +
+        '<td>' + (row.rolling ? fmtPercent(row.rolling.median) : '—') + '</td>' +
+        '<td class="neg">' + (row.drawdown ? fmtPercent(row.drawdown.maxDD) : '—') + '</td></tr>';
+    }).join('');
+    html += '</tbody></table></div>';
+    html += '<div class="hint">The split within equity (domestic vs international) and within the defensive sleeves is held at your current targets\' proportions — only the equity-vs-defensive share changes down the rows. The median rises with equity almost the whole way down; the worst window moves the other way. That trade-off is the actual decision, not a single right answer.</div>';
+    html += '<div class="hint stale">Every figure here is the model\'s recall of historical index levels, not official data — a rough, order-of-magnitude comparison, not a substitute for checking real index history. Fetched ' + escapeHTML(new Date(res.fetchedAt).toLocaleString()) + '.</div>';
+    html += '</div>';
+    return html;
+  }
+
   function renderPortfolioTab() {
     var pf = S.portfolio;
     var alloc = computeAllocation();
@@ -3388,6 +3637,7 @@
     // holdings yet there is no drift to show, but that is exactly when someone
     // needs to know what to buy.
     html += renderSleeveCandidates(alloc, plan, cur);
+    html += renderHorizonBacktest();
 
     if (!alloc.priced.length) return html;
 
@@ -3644,6 +3894,8 @@
     }
     else if (action === 'pf-analyse') { analysePortfolio(); }
     else if (action === 'pf-suggest') { fetchSleeveCandidates(); }
+    else if (action === 'pf-toggle-proxies') { S.portfolio.btProxiesOpen = !S.portfolio.btProxiesOpen; savePortfolio(); render(); }
+    else if (action === 'pf-backtest') { runHorizonBacktest(); }
     else if (action === 'pf-pick') {
       S.portfolio.picks[el.dataset.sleeve] = el.dataset.ticker;
       savePortfolio(); render();
