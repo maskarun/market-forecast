@@ -260,7 +260,8 @@
     swp: 'stockplay.swp.v1',
     analysis: 'stockplay.analysis.v1',
     holdings: 'stockplay.holdings.v1',
-    portfolio: 'stockplay.portfolio.v1'
+    portfolio: 'stockplay.portfolio.v1',
+    sleeves: 'stockplay.sleeves.v1'
   };
 
   /* Allocation across sleeves that behave differently is the decision that drives
@@ -283,7 +284,9 @@
       horizon: 'long',
       targets: Object.assign({}, HORIZONS[2].targets),
       band: 5,
-      contribution: 0
+      contribution: 0,
+      picks: {},
+      investAmount: 0
     };
   }
 
@@ -387,6 +390,23 @@
     '{"asOf":"","note":"","profile":{"business":"","sector":"","moat":"","risks":[""]},"financials":[{"period":"","revenue":"","netIncome":"","netMarginPct":0}],"earnings":{"trend":"","beatMissPattern":"","typicalReportingMonths":""},"valuation":{"pe":0,"pb":0,"sectorContext":""},"fund":{"expenseRatioPct":0,"planNote":"","managerName":"","managerSince":"","aumCr":0,"categoryLabel":"","benchmarkName":"","topTenPct":0}}'
   ].join(' ');
 
+  /* Asking for "the best fund" gets last year's winner, which is the failure this
+     whole app has been working against. So selection is pinned to the things that
+     actually predict relative performance, and the passive option is required to
+     appear rather than being quietly skipped. */
+  var SLEEVE_SYSTEM_PROMPT = [
+    'You are a reference for an educational investing sandbox — not live data and not financial advice.',
+    'For each portfolio sleeve requested, list four to five widely-available funds a retail investor could realistically buy in the stated market.',
+    'Select them on cost, breadth of mandate, length of track record, and enough assets under management to be viable. Do NOT select or order by recent performance — past returns have weak persistence and are not a selection criterion here.',
+    'Where a low-cost index or ETF option exists for a sleeve, you must include it. Do not omit passive options in favour of active ones.',
+    'For the international equity sleeve, list only funds actually purchasable from the stated market — for India that means domestically-available international funds or funds of funds, not US-domiciled ETFs.',
+    'The "rationale" field is one short sentence on how the fund fits the sleeve\'s mandate. It must not contain any performance claim, ranking, or recommendation.',
+    'Set "passive" true for index funds and ETFs, false for actively managed funds.',
+    'Report expenseRatioPct for the direct or lowest-cost plan. Omit any field you do not know rather than guessing — an omitted value is treated as unknown, which is the honest outcome.',
+    'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
+    '{"asOf":"","note":"","sleeves":[{"sleeve":"eq_in","candidates":[{"ticker":"","name":"","passive":true,"expenseRatioPct":0,"categoryLabel":"","aumCr":0,"managerName":"","managerSince":"","benchmarkName":"","rationale":""}]}]}'
+  ].join(' ');
+
   var TOP_CATS_SYSTEM_PROMPT = [
     'You are a market reference for an educational investing sandbox — not live market data and not financial advice.',
     'For each Indian mutual fund tax category listed below, name the five best-performing widely-recognized schemes in that category over the requested period, by approximate total return, from your training knowledge.',
@@ -453,6 +473,8 @@
     portfolio: defaultPortfolio(),
     portfolioResult: null,
     portfolioFetch: { loading: false, error: '' },
+    sleeves: {},
+    sleevesFetch: { loading: false, error: '' },
     // Transient per-ticker fetch state for the detail panel; never persisted.
     detailFetch: { loading: false, priceError: '', analysisError: '' },
     swp: defaultSwp(),
@@ -545,6 +567,8 @@
     var savedPf = loadJSON(STORE.portfolio, null);
     S.portfolio = Object.assign(defaultPortfolio(), savedPf || {});
     S.portfolio.targets = Object.assign({}, defaultPortfolio().targets, (savedPf && savedPf.targets) || {});
+    if (!S.portfolio.picks || typeof S.portfolio.picks !== 'object') S.portfolio.picks = {};
+    S.sleeves = loadJSON(STORE.sleeves, {});
     // `detail` is a transient sub-view, not a saved preference.
     S.top.detail = null;
   }
@@ -575,6 +599,7 @@
   function saveAnalysis() { saveJSON(STORE.analysis, S.analysis); }
   function saveHoldings() { saveJSON(STORE.holdings, S.holdings); }
   function savePortfolio() { saveJSON(STORE.portfolio, S.portfolio); }
+  function saveSleeves() { saveJSON(STORE.sleeves, S.sleeves); }
 
   /* ---------------------------------------------------------------------
    * Small utilities
@@ -1583,6 +1608,90 @@
       out.push({ date: dates[i], price: level });
     }
     return out;
+  }
+
+  /* ---- Sleeve candidates ---------------------------------------------
+     Ordered by cost, because expense ratio predicts relative performance more
+     reliably than anything else available. A candidate whose cost we cannot
+     establish sorts last: it cannot be judged on the criterion that matters. */
+  function sanitizeCandidates(raw) {
+    return (Array.isArray(raw) ? raw : []).slice(0, 8).map(function (c) {
+      if (!c || typeof c !== 'object') return null;
+      var fund = sanitizeFund(c) || {};
+      var ticker = cleanStr(c.ticker, 40).toUpperCase();
+      var name = cleanStr(c.name, 160);
+      if (!ticker && !name) return null;
+      return {
+        ticker: ticker || name.slice(0, 24).toUpperCase(),
+        name: name,
+        passive: c.passive === true,
+        rationale: cleanStr(c.rationale, 240),
+        // Normalised to null so "unknown" is one value everywhere — sanitizeFund
+        // returns null wholesale when nothing in it survived bounds-checking.
+        expenseRatioPct: fund.expenseRatioPct == null ? null : fund.expenseRatioPct,
+        categoryLabel: fund.categoryLabel || '',
+        aumCr: fund.aumCr == null ? null : fund.aumCr,
+        managerName: fund.managerName || '',
+        managerSince: fund.managerSince || '',
+        benchmarkName: fund.benchmarkName || ''
+      };
+    }).filter(Boolean);
+  }
+
+  function orderCandidates(list) {
+    return list.slice().sort(function (a, b) {
+      var ax = a.expenseRatioPct, bx = b.expenseRatioPct;
+      if (ax == null && bx == null) return 0;
+      if (ax == null) return 1;          // unknown cost sorts last
+      if (bx == null) return -1;
+      return ax - bx;
+    });
+  }
+  // Factual label read off the expense-ratio column, not a verdict: the cheapest
+  // passive option, or the cheapest overall where a sleeve has none.
+  function defaultCandidate(ordered) {
+    var passive = ordered.filter(function (c) { return c.passive && c.expenseRatioPct != null; });
+    if (passive.length) return passive[0].ticker;
+    var priced = ordered.filter(function (c) { return c.expenseRatioPct != null; });
+    return (priced[0] || ordered[0] || {}).ticker || '';
+  }
+  function sleevesForMarket() { return (S.sleeves || {})[S.top.market] || null; }
+  function sleeveCandidates(sleeveKey) {
+    var s = sleevesForMarket();
+    if (!s || !s.sleeves || !s.sleeves[sleeveKey]) return [];
+    return orderCandidates(s.sleeves[sleeveKey]);
+  }
+  function pickedFor(sleeveKey) {
+    var ordered = sleeveCandidates(sleeveKey);
+    if (!ordered.length) return '';
+    var chosen = (S.portfolio.picks || {})[sleeveKey];
+    return ordered.some(function (c) { return c.ticker === chosen; }) ? chosen : defaultCandidate(ordered);
+  }
+
+  /* Shortfalls first — that reaches target without realising a gain — then any
+     surplus spread by target weight so a large lump does not over-fill one sleeve. */
+  function buyPlan(alloc, plan, amount) {
+    var invest = Math.max(0, Number(amount) || 0);
+    var fill = contributionPlan(plan, invest);
+    var surplus = Math.max(0, invest - fill.contribution);
+    var tTotal = targetsTotal(S.portfolio.targets) || 100;
+    var rows = ASSET_CLASSES.map(function (c) {
+      var target = Number(S.portfolio.targets[c.v]) || 0;
+      var toFill = fill.alloc[c.v] || 0;
+      var extra = surplus * (target / tTotal);
+      return { cls: c, fill: toFill, extra: extra, amount: toFill + extra, ticker: pickedFor(c.v) };
+    });
+    var newTotal = alloc.total + invest;
+    rows.forEach(function (r) {
+      var after = (alloc.bySleeve[r.cls.v] || { value: 0 }).value + r.amount;
+      r.afterPct = newTotal > 0 ? after / newTotal * 100 : 0;
+      r.targetPct = Number(S.portfolio.targets[r.cls.v]) || 0;
+    });
+    return {
+      invest: invest, rows: rows, newTotal: newTotal,
+      covered: fill.covers, unmet: fill.unmet, surplus: surplus,
+      allocated: rows.reduce(function (s, r) { return s + r.amount; }, 0)
+    };
   }
 
   var PORTFOLIO_THRESHOLDS = { correlation: 0.90, concentration: 25, equityFunds: 5 };
@@ -3120,6 +3229,106 @@
       .then(function () { S.portfolioFetch.loading = false; render(); });
   }
 
+  function fetchSleeveCandidates() {
+    var market = S.top.market;
+    S.sleevesFetch = { loading: true, error: '' };
+    render();
+    llmChatRequest(SLEEVE_SYSTEM_PROMPT, JSON.stringify({
+      market: topOption(TOP_MARKETS, market).prompt,
+      sleeves: ASSET_CLASSES.map(function (c) { return { key: c.v, label: c.l }; })
+    })).then(function (content) {
+      var parsed = extractJSON(content);
+      if (!parsed || !Array.isArray(parsed.sleeves)) throw new Error('Could not parse fund candidates from the model response.');
+      var out = {};
+      parsed.sleeves.forEach(function (s) {
+        if (!s || !s.sleeve) return;
+        var list = sanitizeCandidates(s.candidates);
+        if (list.length) out[String(s.sleeve).trim()] = list;
+      });
+      if (!Object.keys(out).length) throw new Error('The model returned no usable candidates.');
+      S.sleeves[market] = {
+        fetchedAt: new Date().toISOString(), model: currentModelLabel(),
+        asOf: cleanStr(parsed.asOf, 160), note: cleanStr(parsed.note, 400), sleeves: out
+      };
+      saveSleeves();
+      toast('success', 'Candidates for ' + Object.keys(out).length + ' sleeves.');
+    }).catch(function (err) {
+      S.sleevesFetch.error = err.message || 'Could not fetch candidates.';
+      toast('error', S.sleevesFetch.error);
+    }).then(function () { S.sleevesFetch.loading = false; render(); });
+  }
+
+  function renderSleeveCandidates(alloc, plan, cur) {
+    var data = sleevesForMarket();
+    var html = '<div class="card"><h2>Filling each sleeve</h2>';
+    html += '<div class="hint">Candidates are chosen and ordered by <strong>expense ratio</strong> — the most reliable predictor of relative performance available, and far more dependable than past returns. Recent performance is deliberately not a selection criterion; index options are always included where they exist.</div>';
+    html += '<div class="btn-row"><button class="primary" data-action="pf-suggest"' + (S.sleevesFetch.loading ? ' disabled' : '') + '>' +
+      (S.sleevesFetch.loading ? '<span class="spinner"></span>Finding candidates…' : (data ? 'Refresh candidates' : 'Suggest funds')) + '</button></div>';
+    if (S.sleevesFetch.error) html += '<div class="err">' + escapeHTML(S.sleevesFetch.error) + '</div>';
+    if (!data) {
+      html += '<div class="hint">One lookup covers all five sleeves.</div></div>';
+      return html;
+    }
+
+    ASSET_CLASSES.forEach(function (c) {
+      var list = sleeveCandidates(c.v);
+      var target = Number(S.portfolio.targets[c.v]) || 0;
+      if (!list.length) return;
+      var def = defaultCandidate(list), picked = pickedFor(c.v);
+      html += '<div class="section-label" style="margin-top:16px">' + escapeHTML(c.l) + ' · ' + target + '% target</div>';
+      html += list.map(function (cd) {
+        var badges = '';
+        if (cd.passive) badges += '<span class="flag-src">index</span>';
+        if (cd.ticker === def) badges += '<span class="flag-src">default</span>';
+        var sub = [];
+        if (cd.categoryLabel) sub.push(cd.categoryLabel);
+        if (cd.aumCr != null) sub.push('AUM ₹' + Math.round(cd.aumCr).toLocaleString('en-IN') + ' Cr');
+        if (cd.managerName) sub.push(cd.managerName);
+        return '<div class="rank-item" style="' + (cd.ticker === picked ? 'border-color:var(--accent)' : '') + '" data-action="pf-pick" data-sleeve="' + escapeHTML(c.v) + '" data-ticker="' + escapeHTML(cd.ticker) + '">' +
+          '<div class="rank-num">' + (cd.ticker === picked ? '✓' : '') + '</div>' +
+          '<div class="rank-body"><div class="rank-ticker">' + escapeHTML(cd.name || cd.ticker) + badges + '</div>' +
+          '<div class="rank-name">' + escapeHTML(cd.ticker) + (sub.length ? ' · ' + escapeHTML(sub.join(' · ')) : '') + '</div>' +
+          (cd.rationale ? '<div class="rank-name">' + escapeHTML(cd.rationale) + '</div>' : '') + '</div>' +
+          '<div class="rank-ret">' + (cd.expenseRatioPct == null ? '<span class="stale">cost n/k</span>' : cd.expenseRatioPct.toFixed(2) + '%') + '</div>' +
+          '</div>';
+      }).join('');
+      if (picked) {
+        html += '<div class="btn-row"><button class="secondary" data-action="pf-analyse-candidate" data-ticker="' + escapeHTML(picked) + '">Examine ' + escapeHTML(picked) + '</button>' +
+          '<button class="secondary" data-action="pf-add-candidate" data-ticker="' + escapeHTML(picked) + '" data-sleeve="' + escapeHTML(c.v) + '">Add to holdings</button></div>';
+      }
+    });
+
+    html += '<div class="hint stale" style="margin-top:14px">The “default” badge marks the cheapest index option in a sleeve, or the cheapest fund where a sleeve has none — a label read off the expense-ratio column, not a recommendation. Every figure here is the model\'s recall, so check the scheme factsheet before acting on any of it. ' +
+      escapeHTML(data.model || '') + (data.asOf ? ' · covers ' + escapeHTML(data.asOf) : '') + (data.note ? ' · ' + escapeHTML(data.note) : '') + '</div>';
+    html += '</div>';
+
+    // ---- Buy plan ----
+    var bp = buyPlan(alloc, plan, S.portfolio.investAmount);
+    html += '<div class="card"><h2>Buy plan</h2>';
+    html += '<div class="field"><label>Amount to invest</label><input ' + swpNumAttrs() +
+      ' data-bind="portfolio.investAmount" value="' + escapeHTML(String(S.portfolio.investAmount)) + '"></div>';
+    if (bp.invest <= 0) {
+      html += '<div class="hint">Enter an amount to see it split across the sleeves — underweight ones first, so you reach target without selling anything.</div></div>';
+      return html;
+    }
+    html += '<div class="tbl-wrap" style="margin-top:10px"><table class="tbl"><thead><tr><th>Sleeve</th><th>Fund</th><th>Amount</th><th>After</th><th>Target</th></tr></thead><tbody>';
+    html += bp.rows.filter(function (r) { return r.amount > 0.5; }).map(function (r) {
+      return '<tr><td>' + escapeHTML(r.cls.l) + '</td><td>' + escapeHTML(r.ticker || '—') + '</td>' +
+        '<td class="pos">' + fmtCurrency(r.amount, cur) + '</td><td>' + r.afterPct.toFixed(1) + '%</td><td>' + r.targetPct + '%</td></tr>';
+    }).join('');
+    html += '</tbody></table></div>';
+    // With nothing held yet there is no shortfall to fill, so don't describe one.
+    var filled = bp.invest - bp.surplus;
+    html += '<div class="hint">' + fmtCurrency(bp.allocated, cur) + ' allocated. ' +
+      (filled > 0.5
+        ? 'Underweight sleeves are filled first — that reaches your targets <strong>without realising a gain</strong>' +
+          (bp.surplus > 0.5 ? ', and the remaining ' + fmtCurrency(bp.surplus, cur) + ' is spread by target weight so no single sleeve is over-filled' : '')
+        : 'Split straight across your target weights, since there is nothing held yet to be under- or over-weight against') +
+      (bp.unmet > 0.5 ? '. ' + fmtCurrency(bp.unmet, cur) + ' of the gap would still remain' : '') + '.</div>';
+    html += '</div>';
+    return html;
+  }
+
   function renderPortfolioTab() {
     var pf = S.portfolio;
     var alloc = computeAllocation();
@@ -3174,6 +3383,11 @@
       '<div class="field"><label>Add ticker</label><input type="text" id="pf-new-ticker" placeholder="e.g. NIFTYBEES" autocapitalize="characters"></div>' +
       '<div class="field"><label>&nbsp;</label><button class="secondary" data-action="pf-add-holding">Add holding</button></div></div>';
     html += '</div>';
+
+    // Candidates and the buy plan come before the drift view on purpose: with no
+    // holdings yet there is no drift to show, but that is exactly when someone
+    // needs to know what to buy.
+    html += renderSleeveCandidates(alloc, plan, cur);
 
     if (!alloc.priced.length) return html;
 
@@ -3429,6 +3643,21 @@
       savePortfolio(); render();
     }
     else if (action === 'pf-analyse') { analysePortfolio(); }
+    else if (action === 'pf-suggest') { fetchSleeveCandidates(); }
+    else if (action === 'pf-pick') {
+      S.portfolio.picks[el.dataset.sleeve] = el.dataset.ticker;
+      savePortfolio(); render();
+    }
+    else if (action === 'pf-analyse-candidate') { S.tab = 'top'; openAnalysis(el.dataset.ticker, ''); }
+    else if (action === 'pf-add-candidate') {
+      var ct = el.dataset.ticker;
+      if (!S.holdings[ct]) S.holdings[ct] = { lots: [], priceOverride: '' };
+      S.holdings[ct].assetClass = el.dataset.sleeve;
+      // No lots invented — the user fills units and price once they have actually bought.
+      if (!S.holdings[ct].lots.length) S.holdings[ct].lots.push({ id: uid(), units: '', price: '', date: todayISO() });
+      saveHoldings(); render();
+      toast('success', ct + ' added — enter units and price once you have bought.');
+    }
     else if (action === 'pf-add-holding') {
       var inp = document.getElementById('pf-new-ticker');
       var tk = (inp && inp.value || '').trim().toUpperCase();
