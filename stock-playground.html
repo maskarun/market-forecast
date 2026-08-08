@@ -430,6 +430,27 @@
     'returnPct is the total percentage return across the whole period, not annualized. Exactly five items per category, best first.'
   ].join(' ');
 
+  // Equity/Commodity are passive by construction (index funds/ETFs); Debt/Liquid are
+  // active, selected for safety rather than yield — so unlike every other ranked list
+  // in this tab, these are NOT ordered by return. The note is shown verbatim in the UI.
+  var MUTUAL_CLASSES = [
+    { v: 'equity', l: 'Equity', note: 'Passive index fund/ETF — selected on tracking error and AUM, not recent performance.' },
+    { v: 'debt', l: 'Debt', note: 'Actively managed — selected for credit quality and steady income, not recent performance.' },
+    { v: 'liquid', l: 'Liquid', note: 'Actively managed — selected for credit quality and steady income, not recent performance.' },
+    { v: 'commodity', l: 'Commodity', note: 'Passive index fund/ETF — selected on tracking error and AUM, not recent performance.' }
+  ];
+  var TOP_MUTUAL_SYSTEM_PROMPT = [
+    'You are a market reference for an educational investing sandbox — not live market data and not financial advice.',
+    'For each Indian mutual fund asset class listed below, name the five leading widely-recognized schemes in that class, from your training knowledge.',
+    'For "equity" and "commodity", list ONLY passive index funds or ETFs — standardized, low-cost, broad-market or commodity-tracking products — selected primarily on tracking error and asset size (AUM), not recent performance.',
+    'For "debt" and "liquid", list leading ACTIVELY MANAGED schemes selected for credit quality of the underlying portfolio, asset size (AUM), and a stable track record aimed at safety and steady income — not high yield or recent returns.',
+    'Use these exact category keys: "equity", "debt", "liquid", "commodity". Cover every category you can. Indian mutual fund schemes have no exchange ticker, so put a short recognizable scheme identifier in "ticker" and the full scheme name in "name".',
+    'Prefer well-known, currently-open schemes a retail investor could actually buy. Give your best good-faith estimate even without certainty.',
+    'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
+    '{"groups":[{"category":"equity","items":[{"ticker":"<short id>","name":"<full scheme name>","returnPct":0}]}]}',
+    'Order each category\'s five items by how well they fit the stated selection criteria, not by returnPct — returnPct is informational context only. Exactly five items per category.'
+  ].join(' ');
+
   /* A model cannot look anything up — it recalls from training data with a cutoff,
      the same staleness the built-in placeholders warn about. So it is asked to
      declare which Finance Act it thinks it is describing and how sure it is, and
@@ -1142,7 +1163,11 @@
   function fetchTopList() {
     var t = S.top;
     var key = topKey(t.market, t.category, t.period);
-    var grouped = t.category === 'swpcats';
+    // Mutual Funds only splits by class for India — the passive/active convention this
+    // asks the model to apply doesn't necessarily translate to the US market.
+    var grouped = t.category === 'swpcats' || (t.category === 'mutual' && t.market === 'in');
+    var groupDefs = t.category === 'swpcats' ? SWP_CATEGORIES : MUTUAL_CLASSES;
+    var groupPrompt = t.category === 'swpcats' ? TOP_CATS_SYSTEM_PROMPT : TOP_MUTUAL_SYSTEM_PROMPT;
 
     // Real data, no model call: NSE's own 365-day change on an imported ETF file
     // covers exactly this one combination honestly (365 days ≈ 1 year); nothing
@@ -1160,14 +1185,14 @@
 
     S.topLoading = true; render();
     var userContent = JSON.stringify(grouped
-      ? { market: 'India', categories: SWP_CATEGORIES.map(function (c) { return c.v; }), period: topOption(TOP_PERIODS, t.period).prompt }
+      ? { market: 'India', categories: groupDefs.map(function (c) { return c.v; }), period: topOption(TOP_PERIODS, t.period).prompt }
       : {
         market: topOption(TOP_MARKETS, t.market).prompt,
         category: t.category,
         period: topOption(TOP_PERIODS, t.period).prompt
       });
 
-    llmChatRequest(grouped ? TOP_CATS_SYSTEM_PROMPT : TOP_SYSTEM_PROMPT, userContent).then(function (content) {
+    llmChatRequest(grouped ? groupPrompt : TOP_SYSTEM_PROMPT, userContent).then(function (content) {
       var parsed = extractJSON(content);
       if (grouped) {
         if (!parsed || !Array.isArray(parsed.groups)) throw new Error('Could not parse the per-category lists from the model response.');
@@ -1179,13 +1204,13 @@
         });
         // Keep whatever came back rather than failing the lot; missing categories
         // are reported in the UI.
-        var groups = SWP_CATEGORIES.filter(function (c) { return byCat[c.v]; })
+        var groups = groupDefs.filter(function (c) { return byCat[c.v]; })
           .map(function (c) { return { category: c.v, items: byCat[c.v] }; });
         if (!groups.length) throw new Error('The model returned no usable fund entries.');
         S.topLists[key] = { fetchedAt: new Date().toISOString(), groups: groups, source: 'model' };
         saveTopLists();
         var total = groups.reduce(function (s, g) { return s + g.items.length; }, 0);
-        toast('success', 'Loaded ' + total + ' funds across ' + groups.length + ' categories.');
+        toast('success', 'Loaded ' + total + ' funds across ' + groups.length + (t.category === 'mutual' ? ' classes.' : ' categories.'));
       } else {
         if (!parsed || !Array.isArray(parsed.items)) throw new Error('Could not parse a top-10 list from the model response.');
         var flat = normalizeTopItems(parsed.items, 10).filter(function (it) { return it.ticker; });
@@ -2808,6 +2833,36 @@
     return html;
   }
 
+  // Equity/Commodity (passive) and Debt/Liquid (active) are selected on the criteria
+  // named in each class's note, not on returnPct — the footer says so explicitly,
+  // since every other ranked list in this tab IS ordered by return and this one isn't.
+  function renderMutualClassGroups(t, entry) {
+    var present = {};
+    entry.groups.forEach(function (g) { present[g.category] = g.items; });
+    var missing = MUTUAL_CLASSES.filter(function (c) { return !present[c.v]; });
+
+    var html = '<div class="card">';
+    html += '<h2>Top 5 per class · India · ' + topOption(TOP_PERIODS, t.period).label + '</h2>';
+    MUTUAL_CLASSES.forEach(function (cls) {
+      var items = present[cls.v];
+      if (!items) return;
+      html += '<div class="section-label" style="margin-top:14px">' + escapeHTML(cls.l) + '</div>';
+      html += '<div class="hint" style="margin:-6px 0 8px">' + escapeHTML(cls.note) + '</div>';
+      html += items.map(function (it, i) {
+        return rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
+          '" data-name="' + escapeHTML(it.name || '') + '"');
+      }).join('');
+    });
+    if (missing.length) {
+      html += '<div class="hint stale" style="margin-top:12px">The model returned nothing for: ' +
+        escapeHTML(missing.map(function (c) { return c.l; }).join(', ')) + '. Refresh to try again.</div>';
+    }
+    html += '<div class="hint">Tap any row for a detailed analysis. Ordered by the model\'s judgement of the stated criteria, not by return — returnPct is shown for context only. Every figure here is the model\'s recall, not verified fund data. Fetched ' +
+      escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
+    html += '</div>';
+    return html;
+  }
+
   function pctStat(label, v) {
     return stat(label, Number.isFinite(v) ? fmtPercent(v) : '—', Number.isFinite(v) ? (v >= 0 ? 'pos' : 'neg') : '');
   }
@@ -3075,20 +3130,28 @@
       return '<button data-action="set-top-period" data-value="' + p.v + '" class="' + (t.period === p.v ? 'active' : '') + '">' + p.l + '</button>';
     }).join('') + '</div>';
     var hasEtfWatch = t.category === 'index' && t.market === 'in' && S.etfWatch && S.etfWatch.items.length;
-    var provenanceHint = hasEtfWatch
+    var mutualGrouped = t.category === 'mutual' && t.market === 'in';
+    var provenanceHint = mutualGrouped
+      ? 'India Mutual Funds split into four classes: Equity and Commodity list only passive index funds/ETFs (selected on tracking error and AUM); Debt and Liquid list leading actively managed funds (selected for credit quality and steady income), not ranked by return. Still the model\'s recall, not verified fund data.'
+      : hasEtfWatch
       ? 'At the 1 Year period, this uses the NSE ETF Market Watch file you imported (Settings → Data) — real 365-day price change, not a model guess. 6 Month and 5 Year still come from the language model\'s training knowledge, not a live feed.'
       : 'Rankings come from the language model\'s training knowledge, not a live market feed — treat them as a rough, possibly out-of-date starting point for exploration.';
     html += '<div class="hint">' + provenanceHint + ' Past performance says nothing about future results, and none of this is financial advice.</div>';
     var usesEtfWatch = hasEtfWatch && t.period === '1y';
-    var loadLabel = t.category === 'swpcats' ? 'Load Top 5 per Category' : (usesEtfWatch ? 'Load Top 5 per Type' : 'Load Top 10');
+    var loadLabel = t.category === 'swpcats' ? 'Load Top 5 per Category'
+      : mutualGrouped ? 'Load Top 5 per Class'
+      : usesEtfWatch ? 'Load Top 5 per Type'
+      : 'Load Top 10';
     html += '<div class="btn-row"><button class="primary" data-action="fetch-top" ' + (S.topLoading ? 'disabled' : '') + '>' +
       (S.topLoading ? '<span class="spinner"></span>Loading…' : (entry ? 'Refresh List' : loadLabel)) + '</button></div>';
     html += '</div>';
 
     if (entry && entry.groups) {
-      // The real ETF path also produces `.groups` (split by type), same as the
-      // model-driven tax-category view — dispatch on source rather than shape.
-      html += (entry.source === 'etfwatch') ? renderEtfTypeGroups(t, entry) : renderTopGroups(t, entry);
+      // Three features now produce `.groups`: SWP tax categories, the real ETF-by-type
+      // view, and Mutual Funds-by-class — dispatch on category/source, not shape.
+      html += t.category === 'mutual' ? renderMutualClassGroups(t, entry)
+        : (entry.source === 'etfwatch') ? renderEtfTypeGroups(t, entry)
+        : renderTopGroups(t, entry);
     } else if (entry) {
       html += '<div class="card">';
       html += '<h2>Top 10 · ' + escapeHTML(topOption(TOP_MARKETS, t.market).l) + ' · ' +
