@@ -1088,6 +1088,38 @@
       .slice(0, limit)
       .map(function (it) { return { ticker: it.symbol, name: it.underlying, returnPct: it.chg365d }; });
   }
+  // Symbol checked before the underlying-text keywords: LIQUIDBEES' underlying reads
+  // "Government Securities" (it holds short-term G-Secs/repo), which would otherwise
+  // misfile a well-known liquid/cash ETF under Debt/Gilt.
+  function classifyEtfType(symbol, underlying) {
+    var s = String(symbol || '').toLowerCase();
+    var u = String(underlying || '').toLowerCase();
+    if (/liquid|1d rate|1-day rate|\bcash\b/.test(s) || /liquid|1d rate|1-day rate/.test(u)) return 'liquid_cash';
+    if (/\bgold\b|\bsilver\b/.test(u)) return 'commodity';
+    if (/gilt|g-sec|gsec|government securities/.test(u)) return 'debt_gilt';
+    return 'equity_index';
+  }
+  var ETF_TYPES = [
+    { v: 'equity_index', l: 'Equity Index' },
+    { v: 'debt_gilt', l: 'Debt / Gilt' },
+    { v: 'liquid_cash', l: 'Liquid / Cash' },
+    { v: 'commodity', l: 'Commodity (Gold/Silver)' }
+  ];
+  function computeEtfTypeGroups(items, perGroup) {
+    var byType = {};
+    (items || []).forEach(function (it) {
+      if (!it || !Number.isFinite(it.chg365d)) return;
+      var t = classifyEtfType(it.symbol, it.underlying);
+      (byType[t] = byType[t] || []).push(it);
+    });
+    return ETF_TYPES.map(function (t) {
+      var list = (byType[t.v] || []).slice()
+        .sort(function (a, b) { return b.chg365d - a.chg365d; })
+        .slice(0, perGroup)
+        .map(function (it) { return { ticker: it.symbol, name: it.underlying, returnPct: it.chg365d }; });
+      return { category: t.v, label: t.l, items: list };
+    }).filter(function (g) { return g.items.length; });
+  }
   function handleEtfWatchImportFile(file) {
     if (!file) return;
     var reader = new FileReader();
@@ -1116,11 +1148,12 @@
     // covers exactly this one combination honestly (365 days ≈ 1 year); nothing
     // else in this tab has a real, non-recall source yet.
     if (t.category === 'index' && t.market === 'in' && t.period === '1y' && S.etfWatch && S.etfWatch.items.length) {
-      var etfItems = computeEtfTop10(S.etfWatch.items, 10);
-      if (!etfItems.length) { toast('error', 'No usable 365-day figures in the imported ETF file.'); return; }
-      S.topLists[key] = { fetchedAt: new Date().toISOString(), items: etfItems, source: 'etfwatch' };
+      var etfGroups = computeEtfTypeGroups(S.etfWatch.items, 5);
+      if (!etfGroups.length) { toast('error', 'No usable 365-day figures in the imported ETF file.'); return; }
+      S.topLists[key] = { fetchedAt: new Date().toISOString(), groups: etfGroups, source: 'etfwatch' };
       saveTopLists();
-      toast('success', 'Computed ' + etfItems.length + ' results from your imported ETF data.');
+      var etfTotal = etfGroups.reduce(function (s, g) { return s + g.items.length; }, 0);
+      toast('success', 'Computed ' + etfTotal + ' results across ' + etfGroups.length + ' types from your imported ETF data.');
       render();
       return;
     }
@@ -2754,6 +2787,27 @@
     return html;
   }
 
+  // Real ETF data grouped by what it actually tracks, so one hot asset class (e.g. a
+  // silver rally) can't crowd every other type out of "Index Funds" — unlike
+  // renderTopGroups, tapping a row here opens the analysis panel, not the SWP planner,
+  // and there's no tax-note line since these aren't tax categories.
+  function renderEtfTypeGroups(t, entry) {
+    var html = '<div class="card">';
+    html += '<h2>Top 5 per type · India · ' + topOption(TOP_PERIODS, t.period).label + '</h2>';
+    entry.groups.forEach(function (g) {
+      if (!g.items.length) return;
+      html += '<div class="section-label" style="margin-top:14px">' + escapeHTML(g.label) + '</div>';
+      html += g.items.map(function (it, i) {
+        return rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
+          '" data-name="' + escapeHTML(it.name || '') + '"');
+      }).join('');
+    });
+    html += '<div class="hint">Tap any row for a detailed analysis. Computed from the NSE ETF Market Watch file imported ' +
+      escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + ' — real 365-day price change.</div>';
+    html += '</div>';
+    return html;
+  }
+
   function pctStat(label, v) {
     return stat(label, Number.isFinite(v) ? fmtPercent(v) : '—', Number.isFinite(v) ? (v >= 0 ? 'pos' : 'neg') : '');
   }
@@ -3025,13 +3079,16 @@
       ? 'At the 1 Year period, this uses the NSE ETF Market Watch file you imported (Settings → Data) — real 365-day price change, not a model guess. 6 Month and 5 Year still come from the language model\'s training knowledge, not a live feed.'
       : 'Rankings come from the language model\'s training knowledge, not a live market feed — treat them as a rough, possibly out-of-date starting point for exploration.';
     html += '<div class="hint">' + provenanceHint + ' Past performance says nothing about future results, and none of this is financial advice.</div>';
+    var usesEtfWatch = hasEtfWatch && t.period === '1y';
+    var loadLabel = t.category === 'swpcats' ? 'Load Top 5 per Category' : (usesEtfWatch ? 'Load Top 5 per Type' : 'Load Top 10');
     html += '<div class="btn-row"><button class="primary" data-action="fetch-top" ' + (S.topLoading ? 'disabled' : '') + '>' +
-      (S.topLoading ? '<span class="spinner"></span>Loading…'
-        : (entry ? 'Refresh List' : (t.category === 'swpcats' ? 'Load Top 5 per Category' : 'Load Top 10'))) + '</button></div>';
+      (S.topLoading ? '<span class="spinner"></span>Loading…' : (entry ? 'Refresh List' : loadLabel)) + '</button></div>';
     html += '</div>';
 
     if (entry && entry.groups) {
-      html += renderTopGroups(t, entry);
+      // The real ETF path also produces `.groups` (split by type), same as the
+      // model-driven tax-category view — dispatch on source rather than shape.
+      html += (entry.source === 'etfwatch') ? renderEtfTypeGroups(t, entry) : renderTopGroups(t, entry);
     } else if (entry) {
       html += '<div class="card">';
       html += '<h2>Top 10 · ' + escapeHTML(topOption(TOP_MARKETS, t.market).l) + ' · ' +
@@ -3040,14 +3097,10 @@
         return rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
           '" data-name="' + escapeHTML(it.name || '') + '"');
       }).join('');
-      var srcNote = entry.source === 'etfwatch'
-        ? 'Computed from the NSE ETF Market Watch file imported ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + ' — real 365-day price change.'
-        : 'Fetched ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.';
-      html += '<div class="hint">Tap any row for a detailed analysis. ' + srcNote + '</div>';
+      html += '<div class="hint">Tap any row for a detailed analysis. Fetched ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
       html += '</div>';
     } else if (!S.topLoading) {
-      html += '<div class="empty">No list loaded yet.<br>Pick a category and period, then tap "' +
-        (t.category === 'swpcats' ? 'Load Top 5 per Category' : 'Load Top 10') + '".</div>';
+      html += '<div class="empty">No list loaded yet.<br>Pick a category and period, then tap "' + loadLabel + '".</div>';
     }
 
     return html;
