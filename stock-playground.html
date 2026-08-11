@@ -268,8 +268,8 @@
     portfolio: 'stockplay.portfolio.v1',
     sleeves: 'stockplay.sleeves.v1',
     etfwatch: 'stockplay.etfwatch.v1',
-    amfinav: 'stockplay.amfinav.v1',
-    mfreturns: 'stockplay.mfreturns.v1'
+    mfreturns: 'stockplay.mfreturns.v1',
+    mfnamematch: 'stockplay.mfnamematch.v1'
   };
 
   /* Allocation across sleeves that behave differently is the decision that drives
@@ -436,21 +436,25 @@
   // active, selected for safety rather than yield — so unlike every other ranked list
   // in this tab, these are NOT ordered by return. The note is shown verbatim in the UI.
   var MUTUAL_CLASSES = [
-    { v: 'equity', l: 'Equity', note: 'Passive index fund/ETF — selected on tracking error and AUM, not recent performance.' },
-    { v: 'debt', l: 'Debt', note: 'Actively managed — selected for credit quality and steady income, not recent performance.' },
-    { v: 'liquid', l: 'Liquid', note: 'Actively managed — selected for credit quality and steady income, not recent performance.' },
-    { v: 'commodity', l: 'Commodity', note: 'Passive index fund/ETF — selected on tracking error and AUM, not recent performance.' }
+    { v: 'equity', l: 'Equity' },
+    { v: 'debt', l: 'Debt' },
+    { v: 'liquid', l: 'Liquid' },
+    { v: 'commodity', l: 'Commodity' }
   ];
-  var TOP_MUTUAL_SYSTEM_PROMPT = [
+  // The model's only job now is naming real candidates — no return figures, no
+  // selection judgement. Ranking is computed afterward from real mfapi.in NAV
+  // history (avgPct of ret6m/ret1y/ret5y), so a fabricated name just fails to
+  // match a real scheme and wastes a slot rather than silently passing through.
+  var TOP_MUTUAL_CANDIDATES_PROMPT = [
     'You are a market reference for an educational investing sandbox — not live market data and not financial advice.',
-    'For each Indian mutual fund asset class listed below, name the five leading widely-recognized schemes in that class, from your training knowledge.',
-    'For "equity" and "commodity", list ONLY passive index funds or ETFs — standardized, low-cost, broad-market or commodity-tracking products — selected primarily on tracking error and asset size (AUM), not recent performance.',
-    'For "debt" and "liquid", list leading ACTIVELY MANAGED schemes selected for credit quality of the underlying portfolio, asset size (AUM), and a stable track record aimed at safety and steady income — not high yield or recent returns.',
-    'Use these exact category keys: "equity", "debt", "liquid", "commodity". Cover every category you can. Indian mutual fund schemes have no exchange ticker, so put a short recognizable scheme identifier in "ticker" and the full scheme name in "name".',
-    'Prefer well-known, currently-open schemes a retail investor could actually buy. Give your best good-faith estimate even without certainty.',
+    'For each Indian mutual fund asset class listed below, name up to 50 real, currently-active Indian mutual fund schemes in that class, from your training knowledge.',
+    'For "equity" and "commodity", name passive index funds or ETF-linked funds only — standardized, low-cost, broad-market or commodity-tracking products.',
+    'For "debt", name actively-managed schemes from quality-oriented categories such as Corporate Bond or Banking & PSU funds — favour safety and steady income over yield.',
+    'For "liquid", name liquid funds.',
+    'Use these exact category keys: "equity", "debt", "liquid", "commodity". Spread names across multiple different AMCs (fund houses) rather than several near-duplicate schemes from one fund family. Every name must be the scheme\'s Direct Plan, Growth option, and must be a real scheme you are confident exists — a made-up name cannot be matched to real data and just wastes a slot.',
     'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
-    '{"groups":[{"category":"equity","items":[{"ticker":"<short id>","name":"<full scheme name>","returnPct":0}]}]}',
-    'Order each category\'s five items by how well they fit the stated selection criteria, not by returnPct — returnPct is informational context only. Exactly five items per category.'
+    '{"groups":[{"category":"equity","items":[{"name":"<full scheme name>"}]}]}',
+    'Up to 50 items per category. Do not include return figures or tickers — only real scheme names.'
   ].join(' ');
 
   /* A model cannot look anything up — it recalls from training data with a cutoff,
@@ -511,8 +515,8 @@
     sleeves: {},
     sleevesFetch: { loading: false, error: '' },
     etfWatch: null,
-    amfiNav: null,
     mfReturns: {},
+    mfNameMatch: {},
     topFetchProgress: null,
     btResult: null,
     btFetch: { loading: false, error: '' },
@@ -613,9 +617,8 @@
     S.sleeves = loadJSON(STORE.sleeves, {});
     S.etfWatch = loadJSON(STORE.etfwatch, null);
     if (!S.etfWatch || !Array.isArray(S.etfWatch.items)) S.etfWatch = null;
-    S.amfiNav = loadJSON(STORE.amfinav, null);
-    if (!S.amfiNav || typeof S.amfiNav.byName !== 'object' || !Array.isArray(S.amfiNav.list)) S.amfiNav = null;
     S.mfReturns = loadJSON(STORE.mfreturns, {});
+    S.mfNameMatch = loadJSON(STORE.mfnamematch, {});
     // `detail` is a transient sub-view, not a saved preference.
     S.top.detail = null;
   }
@@ -648,8 +651,8 @@
   function savePortfolio() { saveJSON(STORE.portfolio, S.portfolio); }
   function saveSleeves() { saveJSON(STORE.sleeves, S.sleeves); }
   function saveEtfWatch() { saveJSON(STORE.etfwatch, S.etfWatch); }
-  function saveAmfiNav() { saveJSON(STORE.amfinav, S.amfiNav); }
   function saveMfReturns() { saveJSON(STORE.mfreturns, S.mfReturns); }
+  function saveMfNameMatch() { saveJSON(STORE.mfnamematch, S.mfNameMatch); }
 
   /* ---------------------------------------------------------------------
    * Small utilities
@@ -869,8 +872,7 @@
     return out;
   }
 
-  // mfapi.in's history uses DD-MM-YYYY (numeric month) — different from AMFI's own
-  // DD-Mon-YYYY already handled by parseAmfiDate.
+  // mfapi.in's history uses DD-MM-YYYY (numeric month).
   function parseMfapiDate(s) {
     var m = /^(\d{2})-(\d{2})-(\d{4})$/.exec(String(s || '').trim());
     return m ? (m[3] + '-' + m[2] + '-' + m[1]) : null;
@@ -912,7 +914,7 @@
           return v ? (last.nav / v - 1) * 100 : null;
         };
         S.mfReturns[schemeCode] = {
-          fetchedAt: new Date().toISOString(), asOf: last.date,
+          fetchedAt: new Date().toISOString(), asOf: last.date, latestNav: last.nav,
           ret6m: retOver(6), ret1y: retOver(12), ret5y: retOver(60)
         };
         saveMfReturns();
@@ -940,50 +942,120 @@
       next();
     });
   }
-  // The real-data entry point for India Mutual Funds, called from fetchTopList
-  // whenever AMFI data is loaded — no model call at all, mirroring the ETF
-  // Market Watch feature. Every fetched scheme is cached indefinitely in
-  // S.mfReturns, so switching the period pill afterward re-ranks from cache with
-  // zero new network calls.
-  function loadAmfiMutualGroups(t, key) {
-    var candidates = computeAmfiMutualCandidates(S.amfiNav);
-    var seen = {}, toFetch = [];
-    MUTUAL_CLASSES.forEach(function (c) {
-      (candidates[c.v] || []).forEach(function (row) {
-        if (!(row.schemeCode in S.mfReturns) && !seen[row.schemeCode]) { seen[row.schemeCode] = true; toFetch.push(row.schemeCode); }
+  // Every plan variant of a fund (Direct/Regular x Growth/IDCW) can come back from
+  // a search under near-identical names — prefer an exact match, else the first
+  // Direct/Growth-flagged result, else just the first result. Never rejects: a
+  // search failure just means that name doesn't get matched, not a crashed batch.
+  function searchMfapiScheme(name) {
+    var wanted = String(name || '').trim();
+    if (!wanted) return Promise.resolve(null);
+    return fetch('https://api.mfapi.in/mf/search?q=' + encodeURIComponent(wanted))
+      .catch(function () { return null; })
+      .then(function (res) { return (res && res.ok) ? res.json() : null; })
+      .then(function (data) {
+        var results = Array.isArray(data) ? data : [];
+        if (!results.length) return null;
+        var lower = wanted.toLowerCase();
+        var exact = results.filter(function (r) { return String(r && r.schemeName || '').trim().toLowerCase() === lower; })[0];
+        var directGrowth = results.filter(function (r) { return isDirectGrowthPlan(r && r.schemeName); })[0];
+        var pick = exact || directGrowth || results[0];
+        var code = pick && pick.schemeCode != null ? String(pick.schemeCode) : null;
+        if (code) {
+          S.mfNameMatch[wanted.toLowerCase()] = code;
+          saveMfNameMatch();
+        }
+        return code;
+      })
+      .catch(function () { return null; });
+  }
+  // Only successful matches are cached — a miss might be a transient search
+  // hiccup rather than a stable fact, so it's retried on the next load instead
+  // of being permanently blacklisted.
+  function matchMutualFundName(name) {
+    var key = String(name || '').trim().toLowerCase();
+    if (key && key in S.mfNameMatch) return Promise.resolve(S.mfNameMatch[key]);
+    return searchMfapiScheme(name);
+  }
+  // The entry point for India Mutual Funds — no import gate, this always runs:
+  // one LLM call for up to 50 candidate names per class, each name resolved to a
+  // real scheme via mfapi.in's own search (phase 1), each newly-resolved scheme's
+  // history fetched (phase 2), then ranked by the average of ret6m/ret1y/ret5y.
+  // Both caches (S.mfNameMatch, S.mfReturns) persist indefinitely, so a name or
+  // scheme already seen on a previous load costs zero new network calls here.
+  function loadMutualRealGroups(t, key) {
+    S.topLoading = true; S.topFetchProgress = null; render();
+    var userContent = JSON.stringify({ market: 'India', categories: MUTUAL_CLASSES.map(function (c) { return c.v; }) });
+    llmChatRequest(TOP_MUTUAL_CANDIDATES_PROMPT, userContent).then(function (content) {
+      var parsed = extractJSON(content);
+      if (!parsed || !Array.isArray(parsed.groups)) throw new Error('Could not parse the candidate fund names from the model response.');
+      var namesByCat = {};
+      parsed.groups.forEach(function (g) {
+        if (!g || !g.category) return;
+        var seen = {}, names = [];
+        (Array.isArray(g.items) ? g.items : []).forEach(function (it) {
+          var nm = String((it && typeof it === 'object' ? it.name : it) || '').trim();
+          var lower = nm.toLowerCase();
+          if (nm && !seen[lower] && names.length < 50) { seen[lower] = true; names.push(nm); }
+        });
+        if (names.length) namesByCat[String(g.category).trim()] = names;
       });
-    });
-    S.topLoading = true;
-    S.topFetchProgress = { done: 0, total: toFetch.length };
-    render();
-    runThrottled(toFetch, function (schemeCode) {
-      return fetchMfapiReturns(schemeCode).then(function () {
-        S.topFetchProgress.done++;
-        if (S.topFetchProgress.done % 5 === 0 || S.topFetchProgress.done === S.topFetchProgress.total) render();
+      var allNames = {};
+      MUTUAL_CLASSES.forEach(function (c) { (namesByCat[c.v] || []).forEach(function (n) { allNames[n.toLowerCase()] = n; }); });
+      var toSearch = Object.keys(allNames).filter(function (k) { return !(k in S.mfNameMatch); }).map(function (k) { return allNames[k]; });
+
+      S.topFetchProgress = { phase: 'search', done: 0, total: toSearch.length };
+      render();
+      return runThrottled(toSearch, function (name) {
+        return matchMutualFundName(name).then(function () {
+          S.topFetchProgress.done++;
+          if (S.topFetchProgress.done % 5 === 0 || S.topFetchProgress.done === S.topFetchProgress.total) render();
+        });
+      }, 6).then(function () { return namesByCat; });
+    }).then(function (namesByCat) {
+      var toFetch = [], seenCodes = {};
+      Object.keys(namesByCat).forEach(function (cat) {
+        namesByCat[cat].forEach(function (n) {
+          var code = S.mfNameMatch[n.toLowerCase()];
+          if (code && !(code in S.mfReturns) && !seenCodes[code]) { seenCodes[code] = true; toFetch.push(code); }
+        });
       });
-    }, 6).then(function () {
-      var periodKey = 'ret' + t.period;
+      S.topFetchProgress = { phase: 'fetch', done: 0, total: toFetch.length };
+      render();
+      return runThrottled(toFetch, function (schemeCode) {
+        return fetchMfapiReturns(schemeCode).then(function () {
+          S.topFetchProgress.done++;
+          if (S.topFetchProgress.done % 5 === 0 || S.topFetchProgress.done === S.topFetchProgress.total) render();
+        });
+      }, 6).then(function () { return namesByCat; });
+    }).then(function (namesByCat) {
       var groups = MUTUAL_CLASSES.map(function (c) {
-        var items = (candidates[c.v] || [])
-          .map(function (row) {
-            var r = S.mfReturns[row.schemeCode];
-            var ret = r && !r.error ? r[periodKey] : null;
-            return { ticker: row.schemeCode, name: row.name, returnPct: Number.isFinite(ret) ? ret : null,
-              schemeCode: row.schemeCode, nav: row.nav, navDate: row.date };
+        var items = (namesByCat[c.v] || [])
+          .map(function (n) {
+            var code = S.mfNameMatch[n.toLowerCase()];
+            var r = code && S.mfReturns[code];
+            if (!r || r.error) return null;
+            var vals = [r.ret6m, r.ret1y, r.ret5y].filter(Number.isFinite);
+            if (!vals.length) return null;
+            var avgPct = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+            return { ticker: code, name: n, returnPct: avgPct, schemeCode: code, nav: r.latestNav, navDate: r.asOf,
+              ret6m: r.ret6m, ret1y: r.ret1y, ret5y: r.ret5y };
           })
-          .filter(function (it) { return Number.isFinite(it.returnPct); })
+          .filter(Boolean)
           .sort(function (a, b) { return b.returnPct - a.returnPct; })
           .slice(0, 5);
         return { category: c.v, items: items };
       }).filter(function (g) { return g.items.length; });
       if (!groups.length) {
-        toast('error', 'No usable real returns computed from AMFI + mfapi.in data.');
+        toast('error', 'None of the model\'s suggested funds could be matched to real mfapi.in data.');
       } else {
-        S.topLists[key] = { fetchedAt: new Date().toISOString(), groups: groups, source: 'amfi' };
+        S.topLists[key] = { fetchedAt: new Date().toISOString(), groups: groups, source: 'mfapi' };
         saveTopLists();
         var total = groups.reduce(function (s, g) { return s + g.items.length; }, 0);
-        toast('success', 'Computed ' + total + ' real results across ' + groups.length + ' classes from AMFI + mfapi.in.');
+        toast('success', 'Computed ' + total + ' real results across ' + groups.length + ' classes from mfapi.in.');
       }
+    }).catch(function (err) {
+      toast('error', err.message || 'Failed to load Mutual Funds.');
+    }).then(function () {
       S.topLoading = false; S.topFetchProgress = null; render();
     });
   }
@@ -1231,56 +1303,6 @@
     return { items: items, skipped: skipped };
   }
 
-  var AMFI_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-  // "05-Aug-2026" -> "2026-08-05"
-  function parseAmfiDate(s) {
-    var m = /^(\d{2})-([A-Za-z]{3})-(\d{4})$/.exec(String(s || '').trim());
-    if (!m) return null;
-    var mi = AMFI_MONTHS.indexOf(m[2].toLowerCase());
-    if (mi < 0) return null;
-    return m[3] + '-' + String(mi + 1).padStart(2, '0') + '-' + m[1];
-  }
-  // AMFI's NAVAll.txt: one row per scheme/plan, semicolon-delimited, interleaved with
-  // AMC-name and category-header lines that carry no semicolons (or a non-numeric first
-  // field) and are skipped rather than parsed. "N.A." NAV stays null, never 0 — an
-  // omitted price is a more honest outcome than an invented one.
-  //
-  // Category-header lines (e.g. "Open Ended Schemes(Debt Scheme - Liquid Fund)") are
-  // interleaved with AMC-name lines that look the same (no ';') but aren't a category —
-  // only lines matching the real header prefix update `section`, so an AMC-name line
-  // between two scheme rows doesn't wipe out the category they actually belong to.
-  var AMFI_SECTION_RE = /^open\s*[- ]?ended\s+schemes/i;
-  function parseAmfiNav(text) {
-    var byName = {}, list = [], count = 0, section = '';
-    String(text || '').split(/\r?\n/).forEach(function (rawLine) {
-      var line = rawLine.trim();
-      if (!line) return;
-      if (line.indexOf(';') < 0) {
-        if (AMFI_SECTION_RE.test(line)) section = line;
-        return;
-      }
-      var f = line.split(';');
-      if (f.length < 6) return;
-      var schemeCode = f[0].trim();
-      if (!/^\d+$/.test(schemeCode)) return;
-      var name = f[3].trim();
-      if (!name) return;
-      var navNum = Number(f[4].trim());
-      var entry = {
-        schemeCode: schemeCode,
-        name: name,
-        section: section,
-        nav: Number.isFinite(navNum) ? navNum : null,
-        date: parseAmfiDate(f[5])
-      };
-      byName[name.toLowerCase()] = entry;
-      list.push(entry);
-      count++;
-    });
-    if (!count) throw new Error('This doesn\'t look like an AMFI NAVAll.txt file — no scheme rows found.');
-    return { byName: byName, list: list, count: count };
-  }
-
   // Symbol checked before the underlying-text keywords: LIQUIDBEES' underlying reads
   // "Government Securities" (it holds short-term G-Secs/repo), which would otherwise
   // misfile a well-known liquid/cash ETF under Debt/Gilt.
@@ -1331,32 +1353,12 @@
     reader.onerror = function () { toast('error', 'Could not read this file.'); };
     reader.readAsText(file);
   }
-  function handleAmfiNavImportFile(file) {
-    if (!file) return;
-    var reader = new FileReader();
-    reader.onload = function () {
-      try {
-        var parsed = parseAmfiNav(String(reader.result));
-        S.amfiNav = { fetchedAt: new Date().toISOString(), byName: parsed.byName, list: parsed.list, count: parsed.count };
-        saveAmfiNav();
-        render();
-        toast('success', 'Imported ' + parsed.count + ' AMFI schemes.');
-      } catch (err) {
-        toast('error', err.message || 'Could not parse this file.');
-      }
-    };
-    reader.onerror = function () { toast('error', 'Could not read this file.'); };
-    reader.readAsText(file);
-  }
-
   function fetchTopList() {
     var t = S.top;
     var key = topKey(t.market, t.category, t.period);
-    // Mutual Funds only splits by class for India — the passive/active convention this
-    // asks the model to apply doesn't necessarily translate to the US market.
-    var grouped = t.category === 'swpcats' || (t.category === 'mutual' && t.market === 'in');
-    var groupDefs = t.category === 'swpcats' ? SWP_CATEGORIES : MUTUAL_CLASSES;
-    var groupPrompt = t.category === 'swpcats' ? TOP_CATS_SYSTEM_PROMPT : TOP_MUTUAL_SYSTEM_PROMPT;
+    var grouped = t.category === 'swpcats';
+    var groupDefs = SWP_CATEGORIES;
+    var groupPrompt = TOP_CATS_SYSTEM_PROMPT;
 
     // Real data, no model call: NSE's own 365-day change on an imported ETF file
     // covers exactly this one combination honestly (365 days ≈ 1 year); nothing
@@ -1372,11 +1374,10 @@
       return;
     }
 
-    // Real data, no model call: AMFI's own scheme categories classify the candidates,
-    // mfapi.in's NAV history ranks them by real return. Fully replaces the LLM path
-    // for this one combination, same "real data replaces recall" precedent as ETFs.
-    if (t.category === 'mutual' && t.market === 'in' && S.amfiNav && S.amfiNav.list && S.amfiNav.list.length) {
-      loadAmfiMutualGroups(t, key);
+    // Mutual Funds only splits by class for India, and always takes the real
+    // LLM-shortlist + mfapi.in-ranked path — no import gate, no plain model path.
+    if (t.category === 'mutual' && t.market === 'in') {
+      loadMutualRealGroups(t, key);
       return;
     }
 
@@ -1407,7 +1408,7 @@
         S.topLists[key] = { fetchedAt: new Date().toISOString(), groups: groups, source: 'model' };
         saveTopLists();
         var total = groups.reduce(function (s, g) { return s + g.items.length; }, 0);
-        toast('success', 'Loaded ' + total + ' funds across ' + groups.length + (t.category === 'mutual' ? ' classes.' : ' categories.'));
+        toast('success', 'Loaded ' + total + ' funds across ' + groups.length + ' categories.');
       } else {
         if (!parsed || !Array.isArray(parsed.items)) throw new Error('Could not parse a top-10 list from the model response.');
         var flat = normalizeTopItems(parsed.items, 10).filter(function (it) { return it.ticker; });
@@ -3030,91 +3031,22 @@
     return html;
   }
 
-  // Equity/Commodity (passive) and Debt/Liquid (active) are selected on the criteria
-  // named in each class's note, not on returnPct — the footer says so explicitly,
-  // since every other ranked list in this tab IS ordered by return and this one isn't.
-  // Exact, case-insensitive match only — AMFI carries the same fund many times over
-  // (Direct/Regular, Growth/IDCW) under near-identical names, so a fuzzy match would
-  // silently attach the wrong plan's NAV, a worse failure than no match at all.
-  function matchAmfiNav(name) {
-    return (S.amfiNav && S.amfiNav.byName[String(name || '').trim().toLowerCase()]) || null;
-  }
-
-  // Direct + Growth only — AMFI lists every plan variant (Direct/Regular x
-  // Growth/IDCW) of the same fund as its own row; without this the "top 5" could be
-  // five plans of one fund. A scheme whose name mentions neither plan word (older/
-  // inconsistent naming) is excluded rather than guessed at.
+  // Direct + Growth only — mfapi.in search returns every plan variant (Direct/
+  // Regular x Growth/IDCW) of the same fund under near-identical names; without
+  // this, picking the wrong plan from search results is a worse failure than no
+  // match at all. A name mentioning neither plan word is treated as ambiguous.
   function isDirectGrowthPlan(name) {
     var n = String(name || '').toLowerCase();
     return /\bdirect\b/.test(n) && /\bgrowth\b/.test(n) && !/idcw|dividend|bonus/.test(n);
   }
-  // Order-sensitive, like classifyEtfType's symbol-before-underlying rule: a
-  // commodity fund's own name ("...Gold ETF FoF...") is checked first since it's the
-  // reliable signal there, before AMFI's section-header wording (which varies more
-  // for commodity products) is consulted for the rest.
-  function classifyAmfiMutualClass(section, name) {
-    var s = String(section || '').toLowerCase();
-    var n = String(name || '').toLowerCase();
-    if (/\bgold\b|\bsilver\b/.test(n)) return 'commodity';
-    if (/liquid fund/.test(s)) return 'liquid';
-    if (/corporate bond fund/.test(s) || /banking\s*(and|&)\s*psu/.test(s)) return 'debt';
-    if (/index fund/.test(s)) return 'equity';
-    return null;
-  }
-  function computeAmfiMutualCandidates(amfiNav) {
-    var out = { equity: [], debt: [], liquid: [], commodity: [] };
-    (amfiNav.list || []).forEach(function (row) {
-      if (!isDirectGrowthPlan(row.name)) return;
-      var cls = classifyAmfiMutualClass(row.section, row.name);
-      if (cls && out[cls]) out[cls].push(row);
-    });
-    return out;
-  }
-  function renderMutualClassGroups(t, entry) {
-    var present = {};
-    entry.groups.forEach(function (g) { present[g.category] = g.items; });
-    var missing = MUTUAL_CLASSES.filter(function (c) { return !present[c.v]; });
-    var totalItems = 0, matchedCount = 0;
 
+  // Every row here is a real fund the model named, matched to a real mfapi.in
+  // scheme, ranked by the average of its real 6m/1y/5y return — no model figures
+  // survive into the ranking, so this card carries none of the "the model's
+  // recall" disclaimers the plain-recall lists elsewhere in this tab show.
+  function renderMutualRealGroups(t, entry) {
     var html = '<div class="card">';
-    html += '<h2>Top 5 per class · India · ' + topOption(TOP_PERIODS, t.period).label + '</h2>';
-    MUTUAL_CLASSES.forEach(function (cls) {
-      var items = present[cls.v];
-      if (!items) return;
-      html += '<div class="section-label" style="margin-top:14px">' + escapeHTML(cls.l) + '</div>';
-      html += '<div class="hint" style="margin:-6px 0 8px">' + escapeHTML(cls.note) + '</div>';
-      html += items.map(function (it, i) {
-        totalItems++;
-        var row = rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
-          '" data-name="' + escapeHTML(it.name || '') + '"');
-        var m = matchAmfiNav(it.name);
-        if (m) {
-          matchedCount++;
-          row += '<div class="hint" style="margin:-4px 0 10px">Real AMFI NAV: ' +
-            (m.nav != null ? '₹' + m.nav.toFixed(4) : 'not published') + ' as of ' + escapeHTML(m.date || 'unknown date') +
-            ' (scheme code ' + escapeHTML(m.schemeCode) + ').</div>';
-        }
-        return row;
-      }).join('');
-    });
-    if (missing.length) {
-      html += '<div class="hint stale" style="margin-top:12px">The model returned nothing for: ' +
-        escapeHTML(missing.map(function (c) { return c.l; }).join(', ')) + '. Refresh to try again.</div>';
-    }
-    html += '<div class="hint">Tap any row for a detailed analysis. Ordered by the model\'s judgement of the stated criteria, not by return — returnPct is shown for context only. Every figure here is the model\'s recall, not verified fund data.' +
-      (S.amfiNav ? ' ' + matchedCount + ' of ' + totalItems + ' matched a real AMFI NAV.' : '') +
-      ' Fetched ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
-    html += '</div>';
-    return html;
-  }
-
-  // The fully real path: entry.source === 'amfi' means every row here is a real
-  // Direct/Growth AMFI scheme, classified from AMFI's own section headers and
-  // ranked by a real mfapi.in-computed return — no model recall, so this card
-  // carries none of the "the model's recall" disclaimers the other cards show.
-  function renderAmfiMutualGroups(t, entry) {
-    var html = '<div class="card">';
-    html += '<h2>Top 5 per class · India · ' + topOption(TOP_PERIODS, t.period).label + '</h2>';
+    html += '<h2>Top 5 per class · India</h2>';
     entry.groups.forEach(function (g) {
       if (!g.items.length) return;
       var cls = topOption(MUTUAL_CLASSES, g.category);
@@ -3122,16 +3054,16 @@
       html += g.items.map(function (it, i) {
         var row = rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
           '" data-name="' + escapeHTML(it.name || '') + '"');
-        row += '<div class="hint" style="margin:-4px 0 10px">Real NAV ' +
+        row += '<div class="hint" style="margin:-4px 0 10px">Latest NAV ' +
           (it.nav != null ? '₹' + it.nav.toFixed(4) : 'not published') + ' as of ' + escapeHTML(it.navDate || 'unknown date') +
+          ' · 6m ' + fmtPercent(it.ret6m) + ' · 1y ' + fmtPercent(it.ret1y) + ' · 5y ' + fmtPercent(it.ret5y) +
           ' · scheme code ' + escapeHTML(it.schemeCode) + '.</div>';
         return row;
       }).join('');
     });
-    html += '<div class="hint">Tap any row for a detailed analysis. Ranked by real ' +
-      topOption(TOP_PERIODS, t.period).label + ' return computed from mfapi.in NAV history — not model recall. ' +
-      'Candidates are Direct/Growth plans classified from AMFI\'s own scheme categories ' +
-      '(Equity: Index Funds · Debt: Corporate Bond + Banking &amp; PSU · Liquid: Liquid Fund · Commodity: Gold/Silver). ' +
+    html += '<div class="hint">Tap any row for a detailed analysis. The model named candidate funds; ranking is real — ' +
+      'each row\'s percentage is the average of its actual 6-month/1-year/5-year return, computed from mfapi.in NAV history ' +
+      '(averaged over whichever periods have enough history, not by the period toggle above). ' +
       'Computed ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
     html += '</div>';
     return html;
@@ -3405,11 +3337,8 @@
     }).join('') + '</div>';
     var hasEtfWatch = t.category === 'index' && t.market === 'in' && S.etfWatch && S.etfWatch.items.length;
     var mutualGrouped = t.category === 'mutual' && t.market === 'in';
-    var hasAmfiMutual = mutualGrouped && S.amfiNav && S.amfiNav.list && S.amfiNav.list.length;
-    var provenanceHint = hasAmfiMutual
-      ? 'India Mutual Funds ranked from real AMFI + mfapi.in data: Direct/Growth plan schemes are classified into four classes from AMFI\'s own scheme categories, then ranked by real computed return for the selected period — not a model guess.'
-      : mutualGrouped
-      ? 'India Mutual Funds split into four classes: Equity and Commodity list only passive index funds/ETFs (selected on tracking error and AUM); Debt and Liquid list leading actively managed funds (selected for credit quality and steady income), not ranked by return. Still the model\'s recall, not verified fund data.'
+    var provenanceHint = mutualGrouped
+      ? 'India Mutual Funds: the model names up to 50 candidate funds per class, each matched to a real mfapi.in scheme and ranked by its actual average 6-month/1-year/5-year return — the period toggle above doesn\'t change the ranking, only the model\'s candidate list does.'
       : hasEtfWatch
       ? 'At the 1 Year period, this uses the NSE ETF Market Watch file you imported (Settings → Data) — real 365-day price change, not a model guess. 6 Month and 5 Year still come from the language model\'s training knowledge, not a live feed.'
       : 'Rankings come from the language model\'s training knowledge, not a live market feed — treat them as a rough, possibly out-of-date starting point for exploration.';
@@ -3420,18 +3349,18 @@
       : usesEtfWatch ? 'Load Top 5 per Type'
       : 'Load Top 10';
     var loadingLabel = S.topFetchProgress
-      ? 'Fetching real returns… ' + S.topFetchProgress.done + '/' + S.topFetchProgress.total
+      ? (S.topFetchProgress.phase === 'search' ? 'Searching funds… ' : 'Fetching real returns… ') +
+        S.topFetchProgress.done + '/' + S.topFetchProgress.total
       : 'Loading…';
     html += '<div class="btn-row"><button class="primary" data-action="fetch-top" ' + (S.topLoading ? 'disabled' : '') + '>' +
       (S.topLoading ? '<span class="spinner"></span>' + escapeHTML(loadingLabel) : (entry ? 'Refresh List' : loadLabel)) + '</button></div>';
     html += '</div>';
 
     if (entry && entry.groups) {
-      // Four features now produce `.groups`: SWP tax categories, the real ETF-by-type
-      // view, Mutual Funds-by-class (model), and Mutual Funds-by-class (real AMFI +
-      // mfapi.in) — dispatch on category/source, not shape.
-      html += t.category === 'mutual'
-        ? (entry.source === 'amfi' ? renderAmfiMutualGroups(t, entry) : renderMutualClassGroups(t, entry))
+      // Three features now produce `.groups`: SWP tax categories, the real
+      // ETF-by-type view, and Mutual Funds-by-class (real, mfapi.in-ranked) —
+      // dispatch on category/source, not shape.
+      html += t.category === 'mutual' ? renderMutualRealGroups(t, entry)
         : (entry.source === 'etfwatch') ? renderEtfTypeGroups(t, entry)
         : renderTopGroups(t, entry);
     } else if (entry) {
@@ -4331,18 +4260,12 @@
     html += '<div class="btn-row"><button class="secondary" data-action="import-etfwatch">Import ETF Market Watch CSV</button>' +
       (S.etfWatch ? '<button class="secondary danger" data-action="clear-etfwatch">Clear ETF Data</button>' : '') + '</div>';
     html += '<div class="divider"></div>';
-    html += '<div class="hint">Import AMFI\'s NAVAll.txt to attach a real, current NAV to Mutual Fund class-split results where the scheme name matches exactly. ' +
-      (S.amfiNav
-        ? S.amfiNav.count + ' AMFI schemes imported, as of ' + escapeHTML(new Date(S.amfiNav.fetchedAt).toLocaleString()) + '.'
-        : 'Nothing imported yet.') + '</div>';
-    html += '<input type="file" accept=".txt,text/plain" id="amfinav-file-input" data-action="import-amfinav-file" style="display:none">';
-    html += '<div class="btn-row"><button class="secondary" data-action="import-amfinav">Import AMFI NAV List</button>' +
-      (S.amfiNav ? '<button class="secondary danger" data-action="clear-amfinav">Clear NAV Data</button>' : '') + '</div>';
-    var mfReturnCount = Object.keys(S.mfReturns).length;
-    if (mfReturnCount) {
+    var mfMatchCount = Object.keys(S.mfNameMatch).length, mfReturnCount = Object.keys(S.mfReturns).length;
+    if (mfMatchCount || mfReturnCount) {
       html += '<div class="divider"></div>';
-      html += '<div class="hint">' + mfReturnCount + ' mutual fund real returns cached from mfapi.in (used to rank the Mutual Funds class-split view).</div>';
-      html += '<div class="btn-row"><button class="secondary danger" data-action="clear-mfreturns">Clear Mutual Fund Real Returns</button></div>';
+      html += '<div class="hint">Mutual Funds (India) real data, fetched live from mfapi.in: ' + mfMatchCount +
+        ' fund names matched to a real scheme, ' + mfReturnCount + ' real returns cached. Never expires automatically — cleared only on request.</div>';
+      html += '<div class="btn-row"><button class="secondary danger" data-action="clear-mfdata">Clear Mutual Fund Data</button></div>';
     }
     html += '</div>';
 
@@ -4426,9 +4349,12 @@
     else if (action === 'clear-cache') { if (confirm('Clear all cached prices?')) clearCache(); }
     else if (action === 'import-etfwatch') { document.getElementById('etfwatch-file-input').click(); }
     else if (action === 'clear-etfwatch') { if (confirm('Clear imported ETF data?')) { S.etfWatch = null; saveEtfWatch(); render(); } }
-    else if (action === 'import-amfinav') { document.getElementById('amfinav-file-input').click(); }
-    else if (action === 'clear-amfinav') { if (confirm('Clear imported AMFI NAV data?')) { S.amfiNav = null; saveAmfiNav(); render(); } }
-    else if (action === 'clear-mfreturns') { if (confirm('Clear cached mutual fund real returns?')) { S.mfReturns = {}; saveMfReturns(); render(); toast('success', 'Cleared cached real returns.'); } }
+    else if (action === 'clear-mfdata') {
+      if (confirm('Clear cached mutual fund matches and real returns?')) {
+        S.mfReturns = {}; S.mfNameMatch = {}; saveMfReturns(); saveMfNameMatch(); render();
+        toast('success', 'Cleared cached mutual fund data.');
+      }
+    }
     else if (action === 'set-top-market') {
       S.top.market = el.dataset.value;
       // The tax-category view is India-only; don't leave the UI on an option
@@ -4531,10 +4457,6 @@
     // File inputs fire both 'input' and 'change' on selection; handle once.
     if (e.target.dataset && e.target.dataset.action === 'import-etfwatch-file') {
       if (e.type === 'change') handleEtfWatchImportFile(e.target.files[0]);
-      return;
-    }
-    if (e.target.dataset && e.target.dataset.action === 'import-amfinav-file') {
-      if (e.type === 'change') handleAmfiNavImportFile(e.target.files[0]);
       return;
     }
     var el = e.target.closest('[data-bind]');
