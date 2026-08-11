@@ -1281,14 +1281,6 @@
     return { byName: byName, list: list, count: count };
   }
 
-  function computeEtfTop10(items, limit) {
-    return (items || [])
-      .filter(function (it) { return it && Number.isFinite(it.chg365d); })
-      .slice()
-      .sort(function (a, b) { return b.chg365d - a.chg365d; })
-      .slice(0, limit)
-      .map(function (it) { return { ticker: it.symbol, name: it.underlying, returnPct: it.chg365d }; });
-  }
   // Symbol checked before the underlying-text keywords: LIQUIDBEES' underlying reads
   // "Government Securities" (it holds short-term G-Secs/repo), which would otherwise
   // misfile a well-known liquid/cash ETF under Debt/Gilt.
