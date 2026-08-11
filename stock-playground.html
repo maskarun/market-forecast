@@ -267,7 +267,8 @@
     holdings: 'stockplay.holdings.v1',
     portfolio: 'stockplay.portfolio.v1',
     sleeves: 'stockplay.sleeves.v1',
-    etfwatch: 'stockplay.etfwatch.v1'
+    etfwatch: 'stockplay.etfwatch.v1',
+    amfinav: 'stockplay.amfinav.v1'
   };
 
   /* Allocation across sleeves that behave differently is the decision that drives
@@ -509,6 +510,7 @@
     sleeves: {},
     sleevesFetch: { loading: false, error: '' },
     etfWatch: null,
+    amfiNav: null,
     btResult: null,
     btFetch: { loading: false, error: '' },
     // Transient per-ticker fetch state for the detail panel; never persisted.
@@ -608,6 +610,8 @@
     S.sleeves = loadJSON(STORE.sleeves, {});
     S.etfWatch = loadJSON(STORE.etfwatch, null);
     if (!S.etfWatch || !Array.isArray(S.etfWatch.items)) S.etfWatch = null;
+    S.amfiNav = loadJSON(STORE.amfinav, null);
+    if (!S.amfiNav || typeof S.amfiNav.byName !== 'object') S.amfiNav = null;
     // `detail` is a transient sub-view, not a saved preference.
     S.top.detail = null;
   }
@@ -640,6 +644,7 @@
   function savePortfolio() { saveJSON(STORE.portfolio, S.portfolio); }
   function saveSleeves() { saveJSON(STORE.sleeves, S.sleeves); }
   function saveEtfWatch() { saveJSON(STORE.etfwatch, S.etfWatch); }
+  function saveAmfiNav() { saveJSON(STORE.amfinav, S.amfiNav); }
 
   /* ---------------------------------------------------------------------
    * Small utilities
@@ -1101,6 +1106,43 @@
     }
     return { items: items, skipped: skipped };
   }
+
+  var AMFI_MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  // "05-Aug-2026" -> "2026-08-05"
+  function parseAmfiDate(s) {
+    var m = /^(\d{2})-([A-Za-z]{3})-(\d{4})$/.exec(String(s || '').trim());
+    if (!m) return null;
+    var mi = AMFI_MONTHS.indexOf(m[2].toLowerCase());
+    if (mi < 0) return null;
+    return m[3] + '-' + String(mi + 1).padStart(2, '0') + '-' + m[1];
+  }
+  // AMFI's NAVAll.txt: one row per scheme/plan, semicolon-delimited, interleaved with
+  // AMC-name and category-header lines that carry no semicolons (or a non-numeric first
+  // field) and are skipped rather than parsed. "N.A." NAV stays null, never 0 — an
+  // omitted price is a more honest outcome than an invented one.
+  function parseAmfiNav(text) {
+    var byName = {}, count = 0;
+    String(text || '').split(/\r?\n/).forEach(function (rawLine) {
+      var line = rawLine.trim();
+      if (!line || line.indexOf(';') < 0) return;
+      var f = line.split(';');
+      if (f.length < 6) return;
+      var schemeCode = f[0].trim();
+      if (!/^\d+$/.test(schemeCode)) return;
+      var name = f[3].trim();
+      if (!name) return;
+      var navNum = Number(f[4].trim());
+      byName[name.toLowerCase()] = {
+        schemeCode: schemeCode,
+        nav: Number.isFinite(navNum) ? navNum : null,
+        date: parseAmfiDate(f[5])
+      };
+      count++;
+    });
+    if (!count) throw new Error('This doesn\'t look like an AMFI NAVAll.txt file — no scheme rows found.');
+    return { byName: byName, count: count };
+  }
+
   function computeEtfTop10(items, limit) {
     return (items || [])
       .filter(function (it) { return it && Number.isFinite(it.chg365d); })
@@ -1152,6 +1194,23 @@
         saveEtfWatch();
         render();
         toast('success', 'Imported ' + parsed.items.length + ' ETFs' + (parsed.skipped ? ' (' + parsed.skipped + ' rows skipped)' : '') + '.');
+      } catch (err) {
+        toast('error', err.message || 'Could not parse this file.');
+      }
+    };
+    reader.onerror = function () { toast('error', 'Could not read this file.'); };
+    reader.readAsText(file);
+  }
+  function handleAmfiNavImportFile(file) {
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      try {
+        var parsed = parseAmfiNav(String(reader.result));
+        S.amfiNav = { fetchedAt: new Date().toISOString(), byName: parsed.byName, count: parsed.count };
+        saveAmfiNav();
+        render();
+        toast('success', 'Imported ' + parsed.count + ' AMFI schemes.');
       } catch (err) {
         toast('error', err.message || 'Could not parse this file.');
       }
@@ -2836,10 +2895,17 @@
   // Equity/Commodity (passive) and Debt/Liquid (active) are selected on the criteria
   // named in each class's note, not on returnPct — the footer says so explicitly,
   // since every other ranked list in this tab IS ordered by return and this one isn't.
+  // Exact, case-insensitive match only — AMFI carries the same fund many times over
+  // (Direct/Regular, Growth/IDCW) under near-identical names, so a fuzzy match would
+  // silently attach the wrong plan's NAV, a worse failure than no match at all.
+  function matchAmfiNav(name) {
+    return (S.amfiNav && S.amfiNav.byName[String(name || '').trim().toLowerCase()]) || null;
+  }
   function renderMutualClassGroups(t, entry) {
     var present = {};
     entry.groups.forEach(function (g) { present[g.category] = g.items; });
     var missing = MUTUAL_CLASSES.filter(function (c) { return !present[c.v]; });
+    var totalItems = 0, matchedCount = 0;
 
     var html = '<div class="card">';
     html += '<h2>Top 5 per class · India · ' + topOption(TOP_PERIODS, t.period).label + '</h2>';
@@ -2849,16 +2915,26 @@
       html += '<div class="section-label" style="margin-top:14px">' + escapeHTML(cls.l) + '</div>';
       html += '<div class="hint" style="margin:-6px 0 8px">' + escapeHTML(cls.note) + '</div>';
       html += items.map(function (it, i) {
-        return rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
+        totalItems++;
+        var row = rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
           '" data-name="' + escapeHTML(it.name || '') + '"');
+        var m = matchAmfiNav(it.name);
+        if (m) {
+          matchedCount++;
+          row += '<div class="hint" style="margin:-4px 0 10px">Real AMFI NAV: ' +
+            (m.nav != null ? '₹' + m.nav.toFixed(4) : 'not published') + ' as of ' + escapeHTML(m.date || 'unknown date') +
+            ' (scheme code ' + escapeHTML(m.schemeCode) + ').</div>';
+        }
+        return row;
       }).join('');
     });
     if (missing.length) {
       html += '<div class="hint stale" style="margin-top:12px">The model returned nothing for: ' +
         escapeHTML(missing.map(function (c) { return c.l; }).join(', ')) + '. Refresh to try again.</div>';
     }
-    html += '<div class="hint">Tap any row for a detailed analysis. Ordered by the model\'s judgement of the stated criteria, not by return — returnPct is shown for context only. Every figure here is the model\'s recall, not verified fund data. Fetched ' +
-      escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
+    html += '<div class="hint">Tap any row for a detailed analysis. Ordered by the model\'s judgement of the stated criteria, not by return — returnPct is shown for context only. Every figure here is the model\'s recall, not verified fund data.' +
+      (S.amfiNav ? ' ' + matchedCount + ' of ' + totalItems + ' matched a real AMFI NAV.' : '') +
+      ' Fetched ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
     html += '</div>';
     return html;
   }
@@ -4048,6 +4124,14 @@
     html += '<input type="file" accept=".csv,text/csv" id="etfwatch-file-input" data-action="import-etfwatch-file" style="display:none">';
     html += '<div class="btn-row"><button class="secondary" data-action="import-etfwatch">Import ETF Market Watch CSV</button>' +
       (S.etfWatch ? '<button class="secondary danger" data-action="clear-etfwatch">Clear ETF Data</button>' : '') + '</div>';
+    html += '<div class="divider"></div>';
+    html += '<div class="hint">Import AMFI\'s NAVAll.txt to attach a real, current NAV to Mutual Fund class-split results where the scheme name matches exactly. ' +
+      (S.amfiNav
+        ? S.amfiNav.count + ' AMFI schemes imported, as of ' + escapeHTML(new Date(S.amfiNav.fetchedAt).toLocaleString()) + '.'
+        : 'Nothing imported yet.') + '</div>';
+    html += '<input type="file" accept=".txt,text/plain" id="amfinav-file-input" data-action="import-amfinav-file" style="display:none">';
+    html += '<div class="btn-row"><button class="secondary" data-action="import-amfinav">Import AMFI NAV List</button>' +
+      (S.amfiNav ? '<button class="secondary danger" data-action="clear-amfinav">Clear NAV Data</button>' : '') + '</div>';
     html += '</div>';
 
     html += '<div class="card"><h2>About</h2><div class="hint">Everything here — settings, scenarios, cached prices — lives only in this browser\'s localStorage. There is no backend and no database. The LLM is used solely as a historical price lookup; all return, DCA, and gain/loss math is computed locally in JavaScript.</div></div>';
@@ -4130,6 +4214,8 @@
     else if (action === 'clear-cache') { if (confirm('Clear all cached prices?')) clearCache(); }
     else if (action === 'import-etfwatch') { document.getElementById('etfwatch-file-input').click(); }
     else if (action === 'clear-etfwatch') { if (confirm('Clear imported ETF data?')) { S.etfWatch = null; saveEtfWatch(); render(); } }
+    else if (action === 'import-amfinav') { document.getElementById('amfinav-file-input').click(); }
+    else if (action === 'clear-amfinav') { if (confirm('Clear imported AMFI NAV data?')) { S.amfiNav = null; saveAmfiNav(); render(); } }
     else if (action === 'set-top-market') {
       S.top.market = el.dataset.value;
       // The tax-category view is India-only; don't leave the UI on an option
@@ -4232,6 +4318,10 @@
     // File inputs fire both 'input' and 'change' on selection; handle once.
     if (e.target.dataset && e.target.dataset.action === 'import-etfwatch-file') {
       if (e.type === 'change') handleEtfWatchImportFile(e.target.files[0]);
+      return;
+    }
+    if (e.target.dataset && e.target.dataset.action === 'import-amfinav-file') {
+      if (e.type === 'change') handleAmfiNavImportFile(e.target.files[0]);
       return;
     }
     var el = e.target.closest('[data-bind]');
