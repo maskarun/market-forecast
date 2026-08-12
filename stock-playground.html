@@ -156,7 +156,8 @@
   .rank-body { flex: 1 1 auto; min-width: 0; }
   .rank-ticker { font-size: 14px; font-weight: 700; }
   .rank-name { font-size: 11px; color: var(--text-dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rank-extra { font-size: 10px; color: var(--text-faint); margin-top: 4px; line-height: 1.4; }
+  .rank-nav { font-size: 12px; font-weight: 700; color: var(--text); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .rank-extra { font-size: 10px; color: var(--text-faint); margin-top: 2px; line-height: 1.4; }
   .rank-ret { flex: 0 0 auto; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .rank-ret.pos { color: var(--green); }
   .rank-ret.neg { color: var(--red); }
@@ -2834,15 +2835,36 @@
 
   // Shared by the flat top-10 list and the per-category groups; the caller supplies
   // the row's action attributes since the two views tap through to different tabs.
-  function rankRow(it, i, actionAttrs, extraSub) {
+  // `ticker` is a genuine security ticker for every caller of this one (the flat
+  // model-recall list), so ticker-first is the right headline here.
+  function rankRow(it, i, actionAttrs) {
     var pctCls = Number.isFinite(it.returnPct) ? (it.returnPct >= 0 ? 'pos' : 'neg') : '';
     var head = it.ticker || it.name;
     var sub = it.ticker && it.name ? it.name : '';
     return '<div class="rank-item" ' + actionAttrs + '>' +
       '<div class="rank-num">' + (i + 1) + '</div>' +
       '<div class="rank-body"><div class="rank-ticker">' + escapeHTML(head) + '</div>' +
-      (sub ? '<div class="rank-name">' + escapeHTML(sub) + '</div>' : '') +
-      (extraSub ? '<div class="rank-extra">' + extraSub + '</div>' : '') + '</div>' +
+      (sub ? '<div class="rank-name">' + escapeHTML(sub) + '</div>' : '') + '</div>' +
+      '<div class="rank-ret ' + pctCls + '">' + (Number.isFinite(it.returnPct) ? fmtPercent(it.returnPct) : '—') + '</div>' +
+      '</div>';
+  }
+
+  // Used only by renderMfapiRealGroups. Unlike rankRow, `ticker` here is the
+  // mfapi.in scheme code — meaningless to a human — so the fund name leads as
+  // the bold headline instead, with Latest NAV as its own bold line beneath it.
+  // 6m/1y/5y and the scheme code stay, in the small faint line, so the bold
+  // average-return badge still shows its own computation, not just a number.
+  function fundCardRow(it, i, actionAttrs) {
+    var pctCls = Number.isFinite(it.returnPct) ? (it.returnPct >= 0 ? 'pos' : 'neg') : '';
+    var navLine = 'Latest NAV ' + (it.nav != null ? '₹' + it.nav.toFixed(4) : 'not published');
+    var extra = 'as of ' + escapeHTML(it.navDate || 'unknown date') +
+      ' · 6m ' + fmtPercent(it.ret6m) + ' · 1y ' + fmtPercent(it.ret1y) + ' · 5y ' + fmtPercent(it.ret5y) +
+      ' · scheme code ' + escapeHTML(it.schemeCode) + '.';
+    return '<div class="rank-item" ' + actionAttrs + '>' +
+      '<div class="rank-num">' + (i + 1) + '</div>' +
+      '<div class="rank-body"><div class="rank-ticker">' + escapeHTML(it.name || it.ticker) + '</div>' +
+      '<div class="rank-nav">' + navLine + '</div>' +
+      '<div class="rank-extra">' + extra + '</div></div>' +
       '<div class="rank-ret ' + pctCls + '">' + (Number.isFinite(it.returnPct) ? fmtPercent(it.returnPct) : '—') + '</div>' +
       '</div>';
   }
@@ -2868,12 +2890,8 @@
       var cls = topOption(classes, g.category);
       html += '<div class="section-label" style="margin-top:14px">' + escapeHTML(cls.l) + '</div>';
       html += g.items.map(function (it, i) {
-        var extra = 'Latest NAV ' + (it.nav != null ? '₹' + it.nav.toFixed(4) : 'not published') +
-          ' as of ' + escapeHTML(it.navDate || 'unknown date') +
-          ' · 6m ' + fmtPercent(it.ret6m) + ' · 1y ' + fmtPercent(it.ret1y) + ' · 5y ' + fmtPercent(it.ret5y) +
-          ' · scheme code ' + escapeHTML(it.schemeCode) + '.';
-        return rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
-          '" data-name="' + escapeHTML(it.name || '') + '"', extra);
+        return fundCardRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
+          '" data-name="' + escapeHTML(it.name || '') + '"');
       }).join('');
     });
     html += '<div class="hint">Tap any row for a detailed analysis. The model named candidate ' + itemNoun + 's; ranking is real — ' +
@@ -3127,23 +3145,20 @@
     var html = '';
 
     html += '<div class="card">';
-    html += '<h2>Category</h2>';
     html += '<div class="toggle-pill">' + TOP_CATEGORIES.map(function (c) {
       return '<button data-action="set-top-category" data-value="' + c.v + '" class="' + (t.category === c.v ? 'active' : '') + '">' + c.l + '</button>';
     }).join('') + '</div>';
-    html += '<div class="divider"></div>';
-    html += '<h2>Period</h2>';
-    html += '<div class="toggle-pill">' + TOP_PERIODS.map(function (p) {
+    html += '<div class="toggle-pill" style="margin-top:8px">' + TOP_PERIODS.map(function (p) {
       return '<button data-action="set-top-period" data-value="' + p.v + '" class="' + (t.period === p.v ? 'active' : '') + '">' + p.l + '</button>';
     }).join('') + '</div>';
     var mutualGrouped = t.category === 'mutual' && t.market === 'in';
     var indexGrouped = t.category === 'index' && t.market === 'in';
     var provenanceHint = mutualGrouped
-      ? 'India Mutual Funds: the model names up to 50 candidate funds per class, each matched to a real mfapi.in scheme and ranked by its actual average 6-month/1-year/5-year return — the period toggle above doesn\'t change the ranking, only the model\'s candidate list does.'
+      ? 'Real data: the model shortlists candidate funds per class; mfapi.in ranks them by actual average 6-month/1-year/5-year return, not the period toggle.'
       : indexGrouped
-      ? 'India Index Funds: the model names up to 50 candidate index funds/ETFs per type, each matched to a real mfapi.in scheme and ranked by its actual average 6-month/1-year/5-year return — the period toggle above doesn\'t change the ranking, only the model\'s candidate list does.'
+      ? 'Real data: the model shortlists candidate funds/ETFs per type; mfapi.in ranks them by actual average 6-month/1-year/5-year return, not the period toggle.'
       : 'Rankings come from the language model\'s training knowledge, not a live market feed — treat them as a rough, possibly out-of-date starting point for exploration.';
-    html += '<div class="hint">' + provenanceHint + ' Past performance says nothing about future results, and none of this is financial advice.</div>';
+    html += '<div class="hint" style="margin-top:8px">' + provenanceHint + ' Past performance says nothing about future results, and none of this is financial advice.</div>';
     var loadLabel = mutualGrouped ? 'Load Top 5 per Class'
       : indexGrouped ? 'Load Top 5 per Type'
       : 'Load Top 10';
