@@ -375,7 +375,7 @@
   var TOP_SYSTEM_PROMPT = [
     'You are a market reference for an educational investing sandbox — not live market data and not financial advice.',
     'Given a market, a category and a lookback period, list the ten best-performing widely-recognized securities in that category by approximate total return over that period, drawn from your training knowledge.',
-    'Categories: "stocks" = individual listed equities; "index" = index funds / index-tracking ETFs; "mutual" = actively managed mutual funds.',
+    'Categories: "index" = index funds / index-tracking ETFs; "mutual" = actively managed mutual funds.',
     'Prefer well-known, currently-listed, broadly available securities a retail investor could actually buy, and use each one\'s real ticker symbol.',
     'Return ONLY securities actually listed and traded in the requested market, using that market\'s conventional ticker symbols — e.g. NSE symbols such as RELIANCE, TCS or INFY for India, and NYSE/NASDAQ symbols for the US.',
     'Indian mutual fund schemes have no exchange ticker: for those, put a short recognizable scheme identifier in "ticker" and the full scheme name in "name".',
@@ -419,17 +419,6 @@
     'Report expenseRatioPct for the direct or lowest-cost plan. Omit any field you do not know rather than guessing — an omitted value is treated as unknown, which is the honest outcome.',
     'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
     '{"asOf":"","note":"","sleeves":[{"sleeve":"eq_in","candidates":[{"ticker":"","name":"","passive":true,"expenseRatioPct":0,"categoryLabel":"","aumCr":0,"managerName":"","managerSince":"","benchmarkName":"","rationale":""}]}]}'
-  ].join(' ');
-
-  var TOP_CATS_SYSTEM_PROMPT = [
-    'You are a market reference for an educational investing sandbox — not live market data and not financial advice.',
-    'For each Indian mutual fund tax category listed below, name the five best-performing widely-recognized schemes in that category over the requested period, by approximate total return, from your training knowledge.',
-    'The categories are Indian income-tax classifications: "equity" = equity-oriented funds holding over 65% equity; "hybrid_eq" = hybrid funds taxed as equity; "hybrid_debt" = hybrid funds taxed as debt; "debt_new" = debt funds whose units were bought on or after 1 April 2023; "debt_legacy" = debt funds from before that date; "arbitrage" = arbitrage funds.',
-    'Use these exact category keys. Cover every category you can. Indian mutual fund schemes have no exchange ticker, so put a short recognizable scheme identifier in "ticker" and the full scheme name in "name".',
-    'Prefer well-known, currently-open schemes a retail investor could actually buy. Give your best good-faith estimate even without certainty; approximate figures are expected.',
-    'Respond with STRICT JSON ONLY, no markdown fences, no commentary, in exactly this shape:',
-    '{"groups":[{"category":"equity","items":[{"ticker":"<short id>","name":"<full scheme name>","returnPct":0}]}]}',
-    'returnPct is the total percentage return across the whole period, not annualized. Exactly five items per category, best first.'
   ].join(' ');
 
   // Equity/Commodity are passive by construction (index funds/ETFs); Debt/Liquid are
@@ -527,7 +516,7 @@
     loading: false,
     activeResult: null,
     activeError: null,
-    top: { market: 'in', category: 'stocks', period: '1y', detail: null, benchmark: {} },
+    top: { market: 'in', category: 'index', period: '1y', detail: null, benchmark: {} },
     topLists: {},
     topLoading: false,
     analysis: {},
@@ -1283,9 +1272,6 @@
   function fetchTopList() {
     var t = S.top;
     var key = topKey(t.market, t.category, t.period);
-    var grouped = t.category === 'swpcats';
-    var groupDefs = SWP_CATEGORIES;
-    var groupPrompt = TOP_CATS_SYSTEM_PROMPT;
 
     // Index Funds and Mutual Funds both split by type/class for India, and both
     // always take the real LLM-shortlist + mfapi.in-ranked path — no import
@@ -1300,42 +1286,22 @@
       return;
     }
 
+    // Only reachable for US Index/Mutual Funds now (India always returns above).
     S.topLoading = true; render();
-    var userContent = JSON.stringify(grouped
-      ? { market: 'India', categories: groupDefs.map(function (c) { return c.v; }), period: topOption(TOP_PERIODS, t.period).prompt }
-      : {
-        market: topOption(TOP_MARKETS, t.market).prompt,
-        category: t.category,
-        period: topOption(TOP_PERIODS, t.period).prompt
-      });
+    var userContent = JSON.stringify({
+      market: topOption(TOP_MARKETS, t.market).prompt,
+      category: t.category,
+      period: topOption(TOP_PERIODS, t.period).prompt
+    });
 
-    llmChatRequest(grouped ? groupPrompt : TOP_SYSTEM_PROMPT, userContent).then(function (content) {
+    llmChatRequest(TOP_SYSTEM_PROMPT, userContent).then(function (content) {
       var parsed = extractJSON(content);
-      if (grouped) {
-        if (!parsed || !Array.isArray(parsed.groups)) throw new Error('Could not parse the per-category lists from the model response.');
-        var byCat = {};
-        parsed.groups.forEach(function (g) {
-          if (!g || !g.category) return;
-          var items = normalizeTopItems(g.items, 5);
-          if (items.length) byCat[String(g.category).trim()] = items;
-        });
-        // Keep whatever came back rather than failing the lot; missing categories
-        // are reported in the UI.
-        var groups = groupDefs.filter(function (c) { return byCat[c.v]; })
-          .map(function (c) { return { category: c.v, items: byCat[c.v] }; });
-        if (!groups.length) throw new Error('The model returned no usable fund entries.');
-        S.topLists[key] = { fetchedAt: new Date().toISOString(), groups: groups, source: 'model' };
-        saveTopLists();
-        var total = groups.reduce(function (s, g) { return s + g.items.length; }, 0);
-        toast('success', 'Loaded ' + total + ' funds across ' + groups.length + ' categories.');
-      } else {
-        if (!parsed || !Array.isArray(parsed.items)) throw new Error('Could not parse a top-10 list from the model response.');
-        var flat = normalizeTopItems(parsed.items, 10).filter(function (it) { return it.ticker; });
-        if (!flat.length) throw new Error('The model returned no usable entries for this list.');
-        S.topLists[key] = { fetchedAt: new Date().toISOString(), items: flat, source: 'model' };
-        saveTopLists();
-        toast('success', 'Loaded ' + flat.length + ' results.');
-      }
+      if (!parsed || !Array.isArray(parsed.items)) throw new Error('Could not parse a top-10 list from the model response.');
+      var flat = normalizeTopItems(parsed.items, 10).filter(function (it) { return it.ticker; });
+      if (!flat.length) throw new Error('The model returned no usable entries for this list.');
+      S.topLists[key] = { fetchedAt: new Date().toISOString(), items: flat, source: 'model' };
+      saveTopLists();
+      toast('success', 'Loaded ' + flat.length + ' results.');
     }).catch(function (err) {
       toast('error', err.message || 'Failed to load the list.');
     }).then(function () { S.topLoading = false; render(); });
@@ -2191,15 +2157,6 @@
     return flags;
   }
 
-  function useSwpCategory(cat) {
-    S.swp.category = cat;
-    S.swpRateFetch.preview = null;
-    saveSwp();
-    S.tab = 'swp';
-    render();
-    toast('success', topOption(SWP_CATEGORIES, cat).l + ' set in the SWP planner.');
-  }
-
   // Only ever invoked from a Top-tab row, so the selected market determines the
   // currency label the What-If form should carry over.
   function openAnalysis(ticker, name) {
@@ -2218,8 +2175,7 @@
     if (!d) return;
     S.detailFetch = { loading: true, priceError: '', analysisError: '' };
     render();
-    var assetType = S.top.category === 'stocks' ? 'individual listed company'
-      : S.top.category === 'index' ? 'index fund or ETF' : 'mutual fund';
+    var assetType = S.top.category === 'index' ? 'index fund or ETF' : 'mutual fund';
     var market = topOption(TOP_MARKETS, S.top.market);
     var dates = monthlyDates(5);
 
@@ -2863,20 +2819,8 @@
   }
 
   var TOP_CATEGORIES = [
-    { v: 'stocks', l: 'Stocks' }, { v: 'index', l: 'Index Funds' }, { v: 'mutual', l: 'Mutual Funds' },
-    // Indian income-tax classifications, so only meaningful for the India market.
-    { v: 'swpcats', l: 'By tax category', indiaOnly: true }
+    { v: 'index', l: 'Index Funds' }, { v: 'mutual', l: 'Mutual Funds' }
   ];
-  function topCategoriesFor(market) {
-    return TOP_CATEGORIES.filter(function (c) { return !c.indiaOnly || market === 'in'; });
-  }
-  // One-line plain-English tax treatment, read from the rates actually in effect.
-  function swpTaxNote(cat) {
-    var r = S.swp.rates;
-    if (cat.tax === 'slab_always') return 'taxed at slab rate however long it is held';
-    var months = cat.hold === 'eq' ? Number(r.eqHoldMonths) : Number(r.otherHoldMonths);
-    return 'taxed as ' + (cat.tax === 'equity' ? 'equity' : 'debt') + ' · long-term after ' + months + ' months';
-  }
   var TOP_MARKETS = [
     { v: 'in', l: 'India', prompt: 'India (securities listed on the NSE or BSE)', currency: 'INR' },
     { v: 'us', l: 'US', prompt: 'the United States (securities listed on the NYSE or NASDAQ)', currency: 'USD' }
@@ -2901,33 +2845,6 @@
       (extraSub ? '<div class="rank-extra">' + extraSub + '</div>' : '') + '</div>' +
       '<div class="rank-ret ' + pctCls + '">' + (Number.isFinite(it.returnPct) ? fmtPercent(it.returnPct) : '—') + '</div>' +
       '</div>';
-  }
-
-  function renderTopGroups(t, entry) {
-    var present = {};
-    entry.groups.forEach(function (g) { present[g.category] = g.items; });
-    var missing = SWP_CATEGORIES.filter(function (c) { return !present[c.v]; });
-
-    var html = '<div class="card">';
-    html += '<h2>Top 5 per tax category · India · ' + topOption(TOP_PERIODS, t.period).label + '</h2>';
-    // Rendered in SWP_CATEGORIES order, not whatever order the model replied in.
-    SWP_CATEGORIES.forEach(function (cat) {
-      var items = present[cat.v];
-      if (!items) return;
-      html += '<div class="section-label" style="margin-top:14px">' + escapeHTML(cat.l) + '</div>';
-      html += '<div class="hint" style="margin:-6px 0 8px">' + escapeHTML(swpTaxNote(cat)) + '</div>';
-      html += items.map(function (it, i) {
-        return rankRow(it, i, 'data-action="use-swp-category" data-category="' + escapeHTML(cat.v) + '"');
-      }).join('');
-    });
-    if (missing.length) {
-      html += '<div class="hint stale" style="margin-top:12px">The model returned nothing for: ' +
-        escapeHTML(missing.map(function (c) { return c.l; }).join(', ')) + '. Refresh to try again.</div>';
-    }
-    html += '<div class="hint">Tap any fund to open the SWP planner with that tax category selected. Fetched ' +
-      escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
-    html += '</div>';
-    return html;
   }
 
   // Direct + Growth only — mfapi.in search returns every plan variant (Direct/
@@ -3144,7 +3061,6 @@
     var cur = topOption(TOP_MARKETS, t.market).currency;
     var a = S.analysis[ticker];
     var stats = detailPriceStats(ticker);
-    var isFund = t.category !== 'stocks';
 
     var html = '<div class="card">';
     html += '<div style="display:flex;align-items:center;gap:10px;justify-content:space-between">';
@@ -3181,22 +3097,7 @@
         }).join('');
         html += '</tbody></table></div></div>';
       }
-      if (!isFund && (a.earnings.trend || a.earnings.beatMissPattern || a.earnings.typicalReportingMonths)) {
-        html += '<div class="card"><h2>Earnings</h2>';
-        if (a.earnings.trend) html += '<div class="hint">' + escapeHTML(a.earnings.trend) + '</div>';
-        if (a.earnings.beatMissPattern) html += '<div class="hint" style="margin-top:8px">' + escapeHTML(a.earnings.beatMissPattern) + '</div>';
-        if (a.earnings.typicalReportingMonths) html += '<div class="hint" style="margin-top:8px">Typically reports: ' + escapeHTML(a.earnings.typicalReportingMonths) + '. No confirmed next date — a model cannot know a future announcement.</div>';
-        html += '</div>';
-      }
-      if (!isFund && (a.valuation.pe != null || a.valuation.pb != null || a.valuation.sectorContext)) {
-        html += '<div class="card"><h2>Valuation</h2><div class="stat-grid">';
-        html += stat('P/E', a.valuation.pe == null ? '—' : a.valuation.pe.toFixed(1));
-        html += stat('P/B', a.valuation.pb == null ? '—' : a.valuation.pb.toFixed(1));
-        html += '</div>';
-        if (a.valuation.sectorContext) html += '<div class="hint">' + escapeHTML(a.valuation.sectorContext) + '</div>';
-        html += '</div>';
-      }
-      html += '<div class="card"><div class="hint stale">⚠ Profile, financials, earnings and valuation are the model\'s training recall, not a data feed. ' +
+      html += '<div class="card"><div class="hint stale">⚠ Profile and financials are the model\'s training recall, not a data feed. ' +
         escapeHTML(a.model || 'The model') + ' states this covers: <strong>' + escapeHTML(a.asOf || 'period not stated') + '</strong>' +
         (a.note ? ' — ' + escapeHTML(a.note) : '') +
         (a.grounded ? ' · ' + a.grounded.sourceCount + ' live web source' + (a.grounded.sourceCount === 1 ? '' : 's') + ' consulted' : '') +
@@ -3204,7 +3105,7 @@
     } else if (S.detailFetch.analysisError) {
       html += '<div class="card"><h2>Analysis</h2><div class="err">' + escapeHTML(S.detailFetch.analysisError) + '</div></div>';
     } else if (S.detailFetch.loading) {
-      html += '<div class="card"><div class="hint"><span class="spinner"></span>Fetching company analysis…</div></div>';
+      html += '<div class="card"><div class="hint"><span class="spinner"></span>Fetching fund analysis…</div></div>';
     }
 
     html += renderLotBlock(ticker, stats, t.market, cur);
@@ -3227,7 +3128,7 @@
 
     html += '<div class="card">';
     html += '<h2>Category</h2>';
-    html += '<div class="toggle-pill">' + topCategoriesFor(t.market).map(function (c) {
+    html += '<div class="toggle-pill">' + TOP_CATEGORIES.map(function (c) {
       return '<button data-action="set-top-category" data-value="' + c.v + '" class="' + (t.category === c.v ? 'active' : '') + '">' + c.l + '</button>';
     }).join('') + '</div>';
     html += '<div class="divider"></div>';
@@ -3243,8 +3144,7 @@
       ? 'India Index Funds: the model names up to 50 candidate index funds/ETFs per type, each matched to a real mfapi.in scheme and ranked by its actual average 6-month/1-year/5-year return — the period toggle above doesn\'t change the ranking, only the model\'s candidate list does.'
       : 'Rankings come from the language model\'s training knowledge, not a live market feed — treat them as a rough, possibly out-of-date starting point for exploration.';
     html += '<div class="hint">' + provenanceHint + ' Past performance says nothing about future results, and none of this is financial advice.</div>';
-    var loadLabel = t.category === 'swpcats' ? 'Load Top 5 per Category'
-      : mutualGrouped ? 'Load Top 5 per Class'
+    var loadLabel = mutualGrouped ? 'Load Top 5 per Class'
       : indexGrouped ? 'Load Top 5 per Type'
       : 'Load Top 10';
     var loadingLabel = S.topFetchProgress
@@ -3256,12 +3156,9 @@
     html += '</div>';
 
     if (entry && entry.groups) {
-      // Three features now produce `.groups`: SWP tax categories, Index Funds-
-      // by-type and Mutual Funds-by-class (both real, mfapi.in-ranked) —
-      // dispatch on category, not shape.
-      html += t.category === 'mutual' ? renderMutualRealGroups(t, entry)
-        : indexGrouped ? renderIndexRealGroups(t, entry)
-        : renderTopGroups(t, entry);
+      // Only India Index/Mutual Funds (both real, mfapi.in-ranked) ever produce
+      // `.groups` now.
+      html += mutualGrouped ? renderMutualRealGroups(t, entry) : renderIndexRealGroups(t, entry);
     } else if (entry) {
       html += '<div class="card">';
       html += '<h2>Top 10 · ' + escapeHTML(topOption(TOP_MARKETS, t.market).l) + ' · ' +
@@ -3964,7 +3861,7 @@
     html += '<div class="card"><h2>Holdings</h2>';
     html += '<div class="hint">Shared with the stock detail panel — anything entered there appears here. Assign each one a sleeve so the mix can be computed.</div>';
     if (!alloc.rows.length) {
-      html += '<div class="empty">No holdings yet.<br>Add one below, or open a stock from the Top 10 tab and enter your lots there.</div>';
+      html += '<div class="empty">No holdings yet.<br>Add one below, or open a fund from the Funds tab and enter your lots there.</div>';
     } else {
       html += '<div class="tbl-wrap" style="margin-top:10px"><table class="tbl"><thead><tr><th>Holding</th><th>Sleeve</th><th>Units</th><th>Value</th><th>Weight</th><th></th></tr></thead><tbody>';
       html += alloc.rows.map(function (e) {
@@ -3980,7 +3877,7 @@
       }).join('');
       html += '</tbody></table></div>';
       html += '<div class="hint">Total ' + fmtCurrency(alloc.total, cur) +
-        (alloc.unpriced.length ? ' · ' + alloc.unpriced.length + ' holding(s) excluded for want of a price — open them from Top 10 and set one.' : '') + '</div>';
+        (alloc.unpriced.length ? ' · ' + alloc.unpriced.length + ' holding(s) excluded for want of a price — open them from Funds and set one.' : '') + '</div>';
     }
     html += '<div class="row" style="margin-top:10px">' +
       '<div class="field"><label>Add ticker</label><input type="text" id="pf-new-ticker" placeholder="e.g. NIFTYBEES" autocapitalize="characters"></div>' +
@@ -4168,7 +4065,7 @@
    * ------------------------------------------------------------------- */
   var TABS = [
     { v: 'new', l: 'New', ic: '＋' },
-    { v: 'top', l: 'Top 10', ic: '★' },
+    { v: 'top', l: 'Funds', ic: '★' },
     { v: 'port', l: 'Mix', ic: '◐' },
     { v: 'swp', l: 'SWP', ic: '₹' },
     { v: 'history', l: 'History', ic: '☰' },
@@ -4176,7 +4073,7 @@
   ];
 
   function renderHeader() {
-    var titles = { new: 'What-If', top: 'Top 10', port: 'Portfolio', swp: 'SWP Planner', history: 'History', settings: 'Settings' };
+    var titles = { new: 'What-If', top: 'Funds', port: 'Portfolio', swp: 'SWP Planner', history: 'History', settings: 'Settings' };
     var marketPill = '<div class="toggle-pill toggle-pill-sm">' + TOP_MARKETS.map(function (m) {
       return '<button data-action="set-top-market" data-value="' + m.v + '" class="' + (S.top.market === m.v ? 'active' : '') + '">' + m.l + '</button>';
     }).join('') + '</div>';
@@ -4245,9 +4142,6 @@
     }
     else if (action === 'set-top-market') {
       S.top.market = el.dataset.value;
-      // The tax-category view is India-only; don't leave the UI on an option
-      // that no longer exists for the selected market.
-      if (S.top.category === 'swpcats' && S.top.market !== 'in') S.top.category = 'stocks';
       // The market selector is global now (header), so What-If's currency label
       // should track it too, not just when arriving there via "Analyze".
       S.draft.currency = topOption(TOP_MARKETS, S.top.market).currency;
@@ -4257,7 +4151,6 @@
     else if (action === 'set-top-period') { S.top.period = el.dataset.value; saveTopPrefs(); render(); }
     else if (action === 'fetch-top') { fetchTopList(); }
     else if (action === 'use-ticker') { useTicker(el.dataset.ticker); }
-    else if (action === 'use-swp-category') { useSwpCategory(el.dataset.category); }
     else if (action === 'open-analysis') { openAnalysis(el.dataset.ticker, el.dataset.name); }
     else if (action === 'close-analysis') { closeAnalysis(); }
     else if (action === 'refresh-analysis') { fetchAnalysis(el.dataset.ticker); }
