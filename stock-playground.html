@@ -156,11 +156,13 @@
   .rank-body { flex: 1 1 auto; min-width: 0; }
   .rank-ticker { font-size: 14px; font-weight: 700; }
   .rank-name { font-size: 11px; color: var(--text-dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rank-nav { font-size: 12px; font-weight: 700; color: var(--text); margin-top: 2px; font-variant-numeric: tabular-nums; }
   .rank-extra { font-size: 10px; color: var(--text-faint); margin-top: 2px; line-height: 1.4; }
-  .rank-ret { flex: 0 0 auto; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .rank-right { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+  .rank-ret { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .rank-ret.pos { color: var(--green); }
   .rank-ret.neg { color: var(--red); }
+  .rank-nav { font-size: 12px; font-weight: 700; color: var(--green); font-variant-numeric: tabular-nums; }
+  .rank-nav.muted { color: var(--text-faint); font-weight: 600; }
   .stale { color: var(--amber); }
 
   /* --- SWP planner --- */
@@ -2851,21 +2853,26 @@
 
   // Used only by renderMfapiRealGroups. Unlike rankRow, `ticker` here is the
   // mfapi.in scheme code — meaningless to a human — so the fund name leads as
-  // the bold headline instead, with Latest NAV as its own bold line beneath it.
+  // the bold headline instead. NAV has no "Latest NAV" label, just the price
+  // itself, stacked below the return percentage on the right — both are per-
+  // fund headline numbers, so they share that column. The as-of date lives
+  // once in the card heading (renderMfapiRealGroups), not repeated per row.
   // 6m/1y/5y and the scheme code stay, in the small faint line, so the bold
   // average-return badge still shows its own computation, not just a number.
   function fundCardRow(it, i, actionAttrs) {
     var pctCls = Number.isFinite(it.returnPct) ? (it.returnPct >= 0 ? 'pos' : 'neg') : '';
-    var navLine = 'Latest NAV ' + (it.nav != null ? '₹' + it.nav.toFixed(4) : 'not published');
-    var extra = 'as of ' + escapeHTML(it.navDate || 'unknown date') +
-      ' · 6m ' + fmtPercent(it.ret6m) + ' · 1y ' + fmtPercent(it.ret1y) + ' · 5y ' + fmtPercent(it.ret5y) +
+    var navText = it.nav != null ? '₹' + it.nav.toFixed(4) : '—';
+    var navCls = it.nav != null ? 'rank-nav' : 'rank-nav muted';
+    var extra = '6m ' + fmtPercent(it.ret6m) + ' · 1y ' + fmtPercent(it.ret1y) + ' · 5y ' + fmtPercent(it.ret5y) +
       ' · scheme code ' + escapeHTML(it.schemeCode) + '.';
     return '<div class="rank-item" ' + actionAttrs + '>' +
       '<div class="rank-num">' + (i + 1) + '</div>' +
       '<div class="rank-body"><div class="rank-ticker">' + escapeHTML(it.name || it.ticker) + '</div>' +
-      '<div class="rank-nav">' + navLine + '</div>' +
       '<div class="rank-extra">' + extra + '</div></div>' +
-      '<div class="rank-ret ' + pctCls + '">' + (Number.isFinite(it.returnPct) ? fmtPercent(it.returnPct) : '—') + '</div>' +
+      '<div class="rank-right">' +
+        '<div class="rank-ret ' + pctCls + '">' + (Number.isFinite(it.returnPct) ? fmtPercent(it.returnPct) : '—') + '</div>' +
+        '<div class="' + navCls + '">' + navText + '</div>' +
+      '</div>' +
       '</div>';
   }
 
@@ -2883,8 +2890,14 @@
   // survive into the ranking, so this card carries none of the "the model's
   // recall" disclaimers the plain-recall lists elsewhere in this tab show.
   function renderMfapiRealGroups(entry, classes, heading, itemNoun) {
+    // One representative as-of date for the whole card, in the heading, rather
+    // than repeating "as of <date>" on every single fund row below.
+    var asOfDate = null;
+    entry.groups.some(function (g) {
+      return g.items.some(function (it) { if (it.navDate) { asOfDate = it.navDate; return true; } return false; });
+    });
     var html = '<div class="card">';
-    html += '<h2>' + escapeHTML(heading) + '</h2>';
+    html += '<h2>' + escapeHTML(heading) + (asOfDate ? ' · as of ' + escapeHTML(asOfDate) : '') + '</h2>';
     entry.groups.forEach(function (g) {
       if (!g.items.length) return;
       var cls = topOption(classes, g.category);
