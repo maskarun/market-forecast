@@ -1041,21 +1041,21 @@
         });
       }, 6).then(function () { return namesByCat; });
     }).then(function (namesByCat) {
+      // Every matched candidate with at least one usable period is kept, not
+      // just a top 5 — the period pill (moved into the results card) re-sorts
+      // and re-slices from this full pool at render time, so a fund that
+      // loses on 6m but wins on 5y still has to be here to show up.
       var groups = classes.map(function (c) {
         var items = (namesByCat[c.v] || [])
           .map(function (n) {
             var code = S.mfNameMatch[n.toLowerCase()];
             var r = code && S.mfReturns[code];
             if (!r || r.error) return null;
-            var vals = [r.ret6m, r.ret1y, r.ret5y].filter(Number.isFinite);
-            if (!vals.length) return null;
-            var avgPct = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
-            return { ticker: code, name: n, returnPct: avgPct, schemeCode: code, nav: r.latestNav, navDate: r.asOf,
+            if (![r.ret6m, r.ret1y, r.ret5y].some(Number.isFinite)) return null;
+            return { ticker: code, name: n, schemeCode: code, nav: r.latestNav, navDate: r.asOf,
               ret6m: r.ret6m, ret1y: r.ret1y, ret5y: r.ret5y };
           })
-          .filter(Boolean)
-          .sort(function (a, b) { return b.returnPct - a.returnPct; })
-          .slice(0, 5);
+          .filter(Boolean);
         return { category: c.v, items: items };
       }).filter(function (g) { return g.items.length; });
       if (!groups.length) {
@@ -1064,7 +1064,8 @@
         S.topLists[key] = { fetchedAt: new Date().toISOString(), groups: groups, source: 'mfapi' };
         saveTopLists();
         var total = groups.reduce(function (s, g) { return s + g.items.length; }, 0);
-        toast('success', 'Computed ' + total + ' real results across ' + groups.length + ' ' + unitNoun + ' from mfapi.in.');
+        toast('success', 'Resolved ' + total + ' real ' + failNoun + ' returns across ' + groups.length + ' ' + unitNoun +
+          ' from mfapi.in — top 5 per ' + unitNoun.replace(/s$/, '') + ' shown, sortable by period.');
       }
     }).catch(function (err) {
       toast('error', err.message || 'Failed to load the list.');
@@ -2885,11 +2886,18 @@
     return /\bdirect\b/.test(n) && /\bgrowth\b/.test(n) && !/idcw|dividend|bonus/.test(n);
   }
 
+  var RET_FIELD_BY_PERIOD = { '6m': 'ret6m', '1y': 'ret1y', '5y': 'ret5y' };
+
   // Every row here is a real fund the model named, matched to a real mfapi.in
-  // scheme, ranked by the average of its real 6m/1y/5y return — no model figures
-  // survive into the ranking, so this card carries none of the "the model's
-  // recall" disclaimers the plain-recall lists elsewhere in this tab show.
-  function renderMfapiRealGroups(entry, classes, heading, itemNoun) {
+  // scheme, ranked by its real return for whichever period is selected below
+  // — no model figures survive into the ranking, so this card carries none of
+  // the "the model's recall" disclaimers the plain-recall lists elsewhere in
+  // this tab show. The period pill lives here (not the top control card)
+  // because it drives this card's sort, not a re-fetch: every candidate's
+  // 6m/1y/5y return is already cached, so switching periods just re-sorts
+  // and re-slices to the top 5 from the full matched pool — zero new calls.
+  function renderMfapiRealGroups(entry, classes, heading, itemNoun, period) {
+    var field = RET_FIELD_BY_PERIOD[period] || 'ret1y';
     // One representative as-of date for the whole card, in the heading, rather
     // than repeating "as of <date>" on every single fund row below.
     var asOfDate = null;
@@ -2898,24 +2906,35 @@
     });
     var html = '<div class="card">';
     html += '<h2>' + escapeHTML(heading) + (asOfDate ? ' · as of ' + escapeHTML(asOfDate) : '') + '</h2>';
+    html += '<div class="toggle-pill toggle-pill-sm" style="margin:10px 0 2px">' + TOP_PERIODS.map(function (p) {
+      return '<button data-action="set-top-period" data-value="' + p.v + '" class="' + (period === p.v ? 'active' : '') + '">' + escapeHTML(p.v) + '</button>';
+    }).join('') + '</div>';
+    var anyRankable = false;
     entry.groups.forEach(function (g) {
-      if (!g.items.length) return;
+      var ranked = g.items.filter(function (it) { return Number.isFinite(it[field]); })
+        .sort(function (a, b) { return b[field] - a[field]; })
+        .slice(0, 5);
+      if (!ranked.length) return;
+      anyRankable = true;
       var cls = topOption(classes, g.category);
       html += '<div class="section-label" style="margin-top:14px">' + escapeHTML(cls.l) + '</div>';
-      html += g.items.map(function (it, i) {
-        return fundCardRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
+      html += ranked.map(function (it, i) {
+        var row = Object.assign({}, it, { returnPct: it[field] });
+        return fundCardRow(row, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
           '" data-name="' + escapeHTML(it.name || '') + '"');
       }).join('');
     });
+    if (!anyRankable) {
+      html += '<div class="hint stale" style="margin-top:12px">None of the resolved ' + itemNoun + 's have a ' + escapeHTML(period) + ' return on record — try a different period.</div>';
+    }
     html += '<div class="hint">Tap any row for a detailed analysis. The model named candidate ' + itemNoun + 's; ranking is real — ' +
-      'each row\'s percentage is the average of its actual 6-month/1-year/5-year return, computed from mfapi.in NAV history ' +
-      '(averaged over whichever periods have enough history, not by the period toggle above). ' +
+      'sorted by each fund\'s actual return for the period selected above, computed from mfapi.in NAV history. ' +
       'Computed ' + escapeHTML(new Date(entry.fetchedAt).toLocaleString()) + '.</div>';
     html += '</div>';
     return html;
   }
-  function renderMutualRealGroups(t, entry) { return renderMfapiRealGroups(entry, MUTUAL_CLASSES, 'Top 5 per class · India', 'fund'); }
-  function renderIndexRealGroups(t, entry) { return renderMfapiRealGroups(entry, ETF_TYPES, 'Top 5 per type · India', 'fund/ETF'); }
+  function renderMutualRealGroups(t, entry) { return renderMfapiRealGroups(entry, MUTUAL_CLASSES, 'Top 5 per class · India', 'fund', t.period); }
+  function renderIndexRealGroups(t, entry) { return renderMfapiRealGroups(entry, ETF_TYPES, 'Top 5 per type · India', 'fund/ETF', t.period); }
 
   function pctStat(label, v) {
     return stat(label, Number.isFinite(v) ? fmtPercent(v) : '—', Number.isFinite(v) ? (v >= 0 ? 'pos' : 'neg') : '');
@@ -3157,19 +3176,24 @@
     var entry = S.topLists[topKey(t.market, t.category, t.period)];
     var html = '';
 
+    var mutualGrouped = t.category === 'mutual' && t.market === 'in';
+    var indexGrouped = t.category === 'index' && t.market === 'in';
     html += '<div class="card">';
     html += '<div class="toggle-pill">' + TOP_CATEGORIES.map(function (c) {
       return '<button data-action="set-top-category" data-value="' + c.v + '" class="' + (t.category === c.v ? 'active' : '') + '">' + c.l + '</button>';
     }).join('') + '</div>';
-    html += '<div class="toggle-pill" style="margin-top:8px">' + TOP_PERIODS.map(function (p) {
-      return '<button data-action="set-top-period" data-value="' + p.v + '" class="' + (t.period === p.v ? 'active' : '') + '">' + p.l + '</button>';
-    }).join('') + '</div>';
-    var mutualGrouped = t.category === 'mutual' && t.market === 'in';
-    var indexGrouped = t.category === 'index' && t.market === 'in';
+    // The Period pill lives inside the results card for India Index/Mutual
+    // Funds instead — it sorts those results by period there, rather than
+    // sitting here doing nothing before anything has loaded.
+    if (!mutualGrouped && !indexGrouped) {
+      html += '<div class="toggle-pill" style="margin-top:8px">' + TOP_PERIODS.map(function (p) {
+        return '<button data-action="set-top-period" data-value="' + p.v + '" class="' + (t.period === p.v ? 'active' : '') + '">' + p.l + '</button>';
+      }).join('') + '</div>';
+    }
     var provenanceHint = mutualGrouped
-      ? 'Real data: the model shortlists candidate funds per class; mfapi.in ranks them by actual average 6-month/1-year/5-year return, not the period toggle.'
+      ? 'Real data: the model shortlists candidate funds per class; mfapi.in ranks them by actual return for whichever period you pick below.'
       : indexGrouped
-      ? 'Real data: the model shortlists candidate funds/ETFs per type; mfapi.in ranks them by actual average 6-month/1-year/5-year return, not the period toggle.'
+      ? 'Real data: the model shortlists candidate funds/ETFs per type; mfapi.in ranks them by actual return for whichever period you pick below.'
       : 'Rankings come from the language model\'s training knowledge, not a live market feed — treat them as a rough, possibly out-of-date starting point for exploration.';
     html += '<div class="hint" style="margin-top:8px">' + provenanceHint + ' Past performance says nothing about future results, and none of this is financial advice.</div>';
     var loadLabel = mutualGrouped ? 'Load Top 5 per Class'
