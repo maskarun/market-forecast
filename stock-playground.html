@@ -156,6 +156,7 @@
   .rank-body { flex: 1 1 auto; min-width: 0; }
   .rank-ticker { font-size: 14px; font-weight: 700; }
   .rank-name { font-size: 11px; color: var(--text-dim); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rank-extra { font-size: 10px; color: var(--text-faint); margin-top: 4px; line-height: 1.4; }
   .rank-ret { flex: 0 0 auto; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .rank-ret.pos { color: var(--green); }
   .rank-ret.neg { color: var(--red); }
@@ -1237,7 +1238,14 @@
    * performers" is a question about current data, so results are only as
    * fresh as the model's training cutoff — surfaced in the UI, not hidden.
    * ------------------------------------------------------------------- */
-  function topKey(market, category, period) { return market + '|' + category + '|' + period; }
+  // Mutual Funds ranking is period-independent (always the blended average of
+  // real 6m/1y/5y return — see renderMutualRealGroups' footer copy), so its key
+  // must not vary by period. Otherwise switching the Period pill would look up
+  // a different, empty S.topLists entry and orphan the already-computed list.
+  function topKey(market, category, period) {
+    var p = (category === 'mutual' && market === 'in') ? 'all' : period;
+    return market + '|' + category + '|' + p;
+  }
 
   function normalizeTopItems(raw, limit) {
     return (Array.isArray(raw) ? raw : []).slice(0, limit).map(function (it) {
@@ -2971,14 +2979,15 @@
 
   // Shared by the flat top-10 list and the per-category groups; the caller supplies
   // the row's action attributes since the two views tap through to different tabs.
-  function rankRow(it, i, actionAttrs) {
+  function rankRow(it, i, actionAttrs, extraSub) {
     var pctCls = Number.isFinite(it.returnPct) ? (it.returnPct >= 0 ? 'pos' : 'neg') : '';
     var head = it.ticker || it.name;
     var sub = it.ticker && it.name ? it.name : '';
     return '<div class="rank-item" ' + actionAttrs + '>' +
       '<div class="rank-num">' + (i + 1) + '</div>' +
       '<div class="rank-body"><div class="rank-ticker">' + escapeHTML(head) + '</div>' +
-      (sub ? '<div class="rank-name">' + escapeHTML(sub) + '</div>' : '') + '</div>' +
+      (sub ? '<div class="rank-name">' + escapeHTML(sub) + '</div>' : '') +
+      (extraSub ? '<div class="rank-extra">' + extraSub + '</div>' : '') + '</div>' +
       '<div class="rank-ret ' + pctCls + '">' + (Number.isFinite(it.returnPct) ? fmtPercent(it.returnPct) : '—') + '</div>' +
       '</div>';
   }
@@ -3052,13 +3061,12 @@
       var cls = topOption(MUTUAL_CLASSES, g.category);
       html += '<div class="section-label" style="margin-top:14px">' + escapeHTML(cls.l) + '</div>';
       html += g.items.map(function (it, i) {
-        var row = rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
-          '" data-name="' + escapeHTML(it.name || '') + '"');
-        row += '<div class="hint" style="margin:-4px 0 10px">Latest NAV ' +
-          (it.nav != null ? '₹' + it.nav.toFixed(4) : 'not published') + ' as of ' + escapeHTML(it.navDate || 'unknown date') +
+        var extra = 'Latest NAV ' + (it.nav != null ? '₹' + it.nav.toFixed(4) : 'not published') +
+          ' as of ' + escapeHTML(it.navDate || 'unknown date') +
           ' · 6m ' + fmtPercent(it.ret6m) + ' · 1y ' + fmtPercent(it.ret1y) + ' · 5y ' + fmtPercent(it.ret5y) +
-          ' · scheme code ' + escapeHTML(it.schemeCode) + '.</div>';
-        return row;
+          ' · scheme code ' + escapeHTML(it.schemeCode) + '.';
+        return rankRow(it, i, 'data-action="open-analysis" data-ticker="' + escapeHTML(it.ticker) +
+          '" data-name="' + escapeHTML(it.name || '') + '"', extra);
       }).join('');
     });
     html += '<div class="hint">Tap any row for a detailed analysis. The model named candidate funds; ranking is real — ' +
