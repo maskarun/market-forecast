@@ -272,7 +272,9 @@
     portfolio: 'stockplay.portfolio.v1',
     sleeves: 'stockplay.sleeves.v1',
     mfreturns: 'stockplay.mfreturns.v1',
-    mfnamematch: 'stockplay.mfnamematch.v1'
+    mfnamematch: 'stockplay.mfnamematch.v1',
+    mfcatalog: 'stockplay.mfcatalog.v1',
+    browseprefs: 'stockplay.browseprefs.v1'
   };
 
   /* Allocation across sleeves that behave differently is the decision that drives
@@ -439,6 +441,45 @@
     { v: 'liquid_cash', l: 'Liquid / Cash' },
     { v: 'commodity', l: 'Commodity (Gold/Silver)' }
   ];
+
+  // Best-effort classification for the Browse tab: mfapi.in's full scheme
+  // catalog has no category field, only free-text names, so every scheme is
+  // sorted into one of these 13 buckets by keyword. Order matters — least
+  // ambiguous first, cap-size rules before hybrid/debt/sectoral so an equity
+  // fund's name never gets caught by an incidental word match, and debt
+  // before sectoral specifically so "Banking and PSU Debt Fund" resolves to
+  // debt rather than the Banking theme.
+  var MF_CATEGORIES = [
+    { v: 'index', l: 'Index Funds' },
+    { v: 'liquid', l: 'Liquid / Money Market / Overnight' },
+    { v: 'gilt', l: 'Gilt / Government Securities' },
+    { v: 'elss', l: 'ELSS / Tax Saver' },
+    { v: 'children', l: "Children's / Retirement" },
+    { v: 'hybrid', l: 'Hybrid / Balanced / Multi Asset' },
+    { v: 'sectoral', l: 'Sectoral / Thematic' },
+    { v: 'debt', l: 'Debt / Income / Bond' },
+    { v: 'smallcap', l: 'Equity – Small Cap' },
+    { v: 'midcap', l: 'Equity – Mid Cap' },
+    { v: 'largecap', l: 'Equity – Large Cap / Large & Mid Cap' },
+    { v: 'multicap', l: 'Equity – Multi Cap / Flexi Cap / Diversified' },
+    { v: 'other', l: 'Others / Uncategorized' }
+  ];
+  function classifyMfCategory(name) {
+    var n = String(name || '').toLowerCase();
+    if (/\bindex\b/.test(n)) return 'index';
+    if (/\b(liquid|overnight|money market)\b/.test(n)) return 'liquid';
+    if (/\b(gilt|g-?sec|government securities)\b/.test(n)) return 'gilt';
+    if (/\b(elss|tax saver|tax plan)\b/.test(n)) return 'elss';
+    if (/\b(children|child|retirement|pension)\b/.test(n)) return 'children';
+    if (/large\s*(&|and)?\s*mid\s*cap|\blarge\s*cap\b/.test(n)) return 'largecap';
+    if (/\bsmall\s*cap\b/.test(n)) return 'smallcap';
+    if (/\bmid\s*cap\b/.test(n)) return 'midcap';
+    if (/\b(multi\s*cap|flexi\s*cap|diversified)\b/.test(n)) return 'multicap';
+    if (/\b(hybrid|balanced advantage|balanced|multi\s*asset|equity savings|arbitrage|dynamic asset)\b/.test(n)) return 'hybrid';
+    if (/banking\s*(and|&)?\s*psu|\b(debt|income|bond|corporate bond|credit risk|short duration|low duration|ultra short|medium duration|long duration|dynamic bond|floater|floating rate)\b/.test(n)) return 'debt';
+    if (/\b(sector|thematic|banking|pharma|healthcare|fmcg|technology|infrastructure|infra|consumption|energy|auto|digital|manufacturing|psu)\b/.test(n)) return 'sectoral';
+    return 'other';
+  }
   // The model's only job now is naming real candidates — no return figures, no
   // selection judgement. Ranking is computed afterward from real mfapi.in NAV
   // history (avgPct of ret6m/ret1y/ret5y), so a fabricated name just fails to
@@ -531,6 +572,9 @@
     sleevesFetch: { loading: false, error: '' },
     mfReturns: {},
     mfNameMatch: {},
+    mfCatalog: { fetchedAt: null, items: [] },
+    browse: { category: 'all', query: '', expanded: null },
+    browseFetch: { loading: false, error: '' },
     topFetchProgress: null,
     btResult: null,
     btFetch: { loading: false, error: '' },
@@ -631,6 +675,11 @@
     S.sleeves = loadJSON(STORE.sleeves, {});
     S.mfReturns = loadJSON(STORE.mfreturns, {});
     S.mfNameMatch = loadJSON(STORE.mfnamematch, {});
+    S.mfCatalog = loadJSON(STORE.mfcatalog, { fetchedAt: null, items: [] });
+    // `query`/`expanded` are transient sub-views, not saved preferences.
+    S.browse = Object.assign({ category: 'all', query: '', expanded: null }, loadJSON(STORE.browseprefs, {}));
+    S.browse.query = '';
+    S.browse.expanded = null;
     // `detail` is a transient sub-view, not a saved preference.
     S.top.detail = null;
   }
@@ -662,6 +711,10 @@
   function saveHoldings() { saveJSON(STORE.holdings, S.holdings); }
   function savePortfolio() { saveJSON(STORE.portfolio, S.portfolio); }
   function saveSleeves() { saveJSON(STORE.sleeves, S.sleeves); }
+  function saveMfCatalog() { saveJSON(STORE.mfcatalog, S.mfCatalog); }
+  // Only `category` is a saved preference; harmless to call on every browse.*
+  // change (including search keystrokes) since it always serializes just this.
+  function saveBrowsePrefs() { saveJSON(STORE.browseprefs, { category: S.browse.category }); }
   function saveMfReturns() { saveJSON(STORE.mfreturns, S.mfReturns); }
   function saveMfNameMatch() { saveJSON(STORE.mfnamematch, S.mfNameMatch); }
 
@@ -933,6 +986,46 @@
       .catch(function (err) {
         S.mfReturns[schemeCode] = { error: err.message || 'Fetch failed.' };
       });
+  }
+  // The full AMFI scheme catalog for the Browse tab — every registered plan
+  // variant of every scheme, ~40k rows, no category field. Filtered down to
+  // Direct+Growth only (isDirectGrowthPlan, below) and classified once, then
+  // cached indefinitely like S.mfReturns/S.mfNameMatch — refreshed only when
+  // the user explicitly asks, since new scheme launches are rare.
+  function loadMfCatalog() {
+    S.browseFetch = { loading: true, error: '' };
+    render();
+    fetch('https://api.mfapi.in/mf')
+      .catch(function (err) { throw new Error('Network error reaching mfapi.in (' + err.message + ')'); })
+      .then(function (res) {
+        if (!res.ok) throw new Error('mfapi.in request failed: ' + res.status + ' ' + res.statusText);
+        return res.json();
+      })
+      .then(function (rows) {
+        var items = (Array.isArray(rows) ? rows : [])
+          .filter(function (r) { return r && r.schemeName && isDirectGrowthPlan(r.schemeName); })
+          .map(function (r) {
+            return { schemeCode: String(r.schemeCode), name: r.schemeName, category: classifyMfCategory(r.schemeName) };
+          });
+        S.mfCatalog = { fetchedAt: new Date().toISOString(), items: items };
+        saveMfCatalog();
+        S.browseFetch = { loading: false, error: '' };
+        toast('success', 'Loaded ' + items.length + ' Direct-Growth schemes.');
+        render();
+      })
+      .catch(function (err) {
+        S.browseFetch = { loading: false, error: err.message || 'Fetch failed.' };
+        render();
+      });
+  }
+  // Reuses S.mfReturns as-is — the same cache the Funds tab fills, so a fund
+  // resolved from either tab stays resolved for both. fetchMfapiReturns never
+  // rejects, so no separate error handling is needed here.
+  function toggleBrowseFund(code) {
+    if (S.browse.expanded === code) { S.browse.expanded = null; render(); return; }
+    S.browse.expanded = code;
+    render();
+    if (!S.mfReturns[code]) fetchMfapiReturns(code).then(render);
   }
   // A small fixed-concurrency queue — ranking a class needs mfapi.in history for
   // every Direct/Growth candidate in it before the top 5 can be known, which can be
@@ -3881,6 +3974,65 @@
     return html;
   }
 
+  // Unlike the Funds tab (LLM-shortlisted candidates ranked by real return),
+  // this is a plain lookup over the entire AMFI catalog — no model involved,
+  // no cap on what's findable, one on-demand real-return fetch per tap.
+  function renderBrowseTab() {
+    var html = '<div class="card"><h2>Browse All Funds</h2>';
+    var catOptions = '<option value="all"' + (S.browse.category === 'all' ? ' selected' : '') + '>All Categories</option>' + MF_CATEGORIES.map(function (c) {
+      return '<option value="' + c.v + '"' + (S.browse.category === c.v ? ' selected' : '') + '>' + escapeHTML(c.l) + '</option>';
+    }).join('');
+    html += '<div class="field"><label>Category</label><select data-bind="browse.category">' + catOptions + '</select></div>';
+    html += '<div class="field"><label>Search fund name</label><input type="text" data-bind="browse.query" value="' +
+      escapeHTML(S.browse.query) + '" placeholder="Search fund name…"></div>';
+
+    if (S.browseFetch.error) html += '<div class="err">' + escapeHTML(S.browseFetch.error) + '</div>';
+    var catalog = S.mfCatalog;
+    if (!catalog.items.length) {
+      html += '<div class="hint">Loads the full AMFI Direct-Growth scheme list (' +
+        'https://api.mfapi.in/mf) and sorts it into the categories above — a plain lookup, not a recommendation. ' +
+        'One multi-MB fetch, cached until you refresh it.</div>';
+      html += '<button data-action="load-mfcatalog"' + (S.browseFetch.loading ? ' disabled' : '') + '>' +
+        (S.browseFetch.loading ? 'Loading…' : 'Load funds') + '</button></div>';
+      return html;
+    }
+    html += '<div class="hint">Loaded ' + catalog.items.length + ' Direct-Growth schemes as of ' +
+      escapeHTML(new Date(catalog.fetchedAt).toLocaleString()) + '. <button class="secondary" data-action="load-mfcatalog"' +
+      (S.browseFetch.loading ? ' disabled' : '') + '>' + (S.browseFetch.loading ? 'Refreshing…' : 'Refresh') + '</button></div>';
+    html += '</div>';
+
+    var q = S.browse.query.trim().toLowerCase();
+    var matches = catalog.items.filter(function (it) {
+      if (S.browse.category !== 'all' && it.category !== S.browse.category) return false;
+      if (q && it.name.toLowerCase().indexOf(q) === -1) return false;
+      return true;
+    });
+    var shown = matches.slice(0, 100);
+
+    html += '<div class="card"><h2>' + matches.length + ' Match' + (matches.length === 1 ? '' : 'es') + '</h2>';
+    if (!matches.length) {
+      html += '<div class="hint">No schemes match this category/search combination.</div></div>';
+      return html;
+    }
+    html += shown.map(function (it, i) {
+      var ret = S.mfReturns[it.schemeCode];
+      var row = { name: it.name, ticker: it.schemeCode, schemeCode: it.schemeCode };
+      if (ret && !ret.error) {
+        row.nav = ret.latestNav; row.ret6m = ret.ret6m; row.ret1y = ret.ret1y; row.ret5y = ret.ret5y;
+        row.returnPct = ret.ret1y;
+      }
+      var out = fundCardRow(row, i, 'data-action="browse-tap" data-scheme="' + escapeHTML(it.schemeCode) + '"');
+      if (ret && ret.error) out += '<div class="err">' + escapeHTML(ret.error) + '</div>';
+      return out;
+    }).join('');
+    if (matches.length > shown.length) {
+      html += '<div class="hint">Showing first 100 of ' + matches.length + ' — refine your search to narrow this down.</div>';
+    }
+    html += '<div class="hint">Tap a fund to fetch its real 6m/1y/5y return from mfapi.in NAV history — nothing is fetched until you tap it.</div>';
+    html += '</div>';
+    return html;
+  }
+
   function renderPortfolioTab() {
     var pf = S.portfolio;
     var alloc = computeAllocation();
@@ -4106,6 +4258,12 @@
         ' fund/ETF names matched to a real scheme, ' + mfReturnCount + ' real returns cached. Shared by both categories — never expires automatically, cleared only on request.</div>';
       html += '<div class="btn-row"><button class="secondary danger" data-action="clear-mfdata">Clear Real Fund Data</button></div>';
     }
+    if (S.mfCatalog.items.length) {
+      html += '<div class="divider"></div>';
+      html += '<div class="hint">Browse tab fund catalog: ' + S.mfCatalog.items.length + ' Direct-Growth schemes cached, loaded ' +
+        escapeHTML(new Date(S.mfCatalog.fetchedAt).toLocaleString()) + '.</div>';
+      html += '<div class="btn-row"><button class="secondary danger" data-action="clear-mfcatalog">Clear Fund Catalog</button></div>';
+    }
     html += '</div>';
 
     html += '<div class="card"><h2>About</h2><div class="hint">Everything here — settings, scenarios, cached prices — lives only in this browser\'s localStorage. There is no backend and no database. The LLM is used solely as a historical price lookup; all return, DCA, and gain/loss math is computed locally in JavaScript.</div></div>';
@@ -4118,6 +4276,7 @@
   var TABS = [
     { v: 'new', l: 'New', ic: '＋' },
     { v: 'top', l: 'Funds', ic: '★' },
+    { v: 'browse', l: 'Browse', ic: '⌕' },
     { v: 'port', l: 'Mix', ic: '◐' },
     { v: 'swp', l: 'SWP', ic: '₹' },
     { v: 'history', l: 'History', ic: '☰' },
@@ -4125,7 +4284,7 @@
   ];
 
   function renderHeader() {
-    var titles = { new: 'What-If', top: 'Funds', port: 'Portfolio', swp: 'SWP Planner', history: 'History', settings: 'Settings' };
+    var titles = { new: 'What-If', top: 'Funds', browse: 'Browse Funds', port: 'Portfolio', swp: 'SWP Planner', history: 'History', settings: 'Settings' };
     var marketPill = '<div class="toggle-pill toggle-pill-sm">' + TOP_MARKETS.map(function (m) {
       return '<button data-action="set-top-market" data-value="' + m.v + '" class="' + (S.top.market === m.v ? 'active' : '') + '">' + m.l + '</button>';
     }).join('') + '</div>';
@@ -4141,6 +4300,7 @@
   function render() {
     var body = S.tab === 'new' ? renderNewTab()
       : S.tab === 'top' ? renderTopTab()
+      : S.tab === 'browse' ? renderBrowseTab()
       : S.tab === 'port' ? renderPortfolioTab()
       : S.tab === 'swp' ? renderSwpTab()
       : S.tab === 'history' ? renderHistoryTab()
@@ -4192,6 +4352,14 @@
         toast('success', 'Cleared cached real fund data.');
       }
     }
+    else if (action === 'clear-mfcatalog') {
+      if (confirm('Clear the cached fund catalog? You will need to reload it next time you open Browse.')) {
+        S.mfCatalog = { fetchedAt: null, items: [] }; saveMfCatalog(); render();
+        toast('success', 'Cleared cached fund catalog.');
+      }
+    }
+    else if (action === 'load-mfcatalog') { loadMfCatalog(); }
+    else if (action === 'browse-tap') { toggleBrowseFund(el.dataset.scheme); }
     else if (action === 'set-top-market') {
       S.top.market = el.dataset.value;
       // The market selector is global now (header), so What-If's currency label
@@ -4300,6 +4468,9 @@
     // SWP recalculates live on every input, per the spec. Raw strings are stored so
     // partial entry ("", "1.") types naturally; the engine coerces at every use.
     if (path.indexOf('top.benchmark.') === 0) { setPath(S, path, el.value); saveTopPrefs(); render(); return; }
+    // Search filters live as you type; only the category choice is persisted
+    // (saveBrowsePrefs ignores query/expanded), see loadState.
+    if (path.indexOf('browse.') === 0) { setPath(S, path, el.value); saveBrowsePrefs(); render(); return; }
     if (path.indexOf('portfolio.') === 0) { setPath(S, path, el.value); savePortfolio(); render(); return; }
     // Holdings recalculate live like the SWP inputs, and store raw strings for the
     // same reason — partial entry has to type naturally.
